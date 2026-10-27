@@ -1,0 +1,20 @@
+# Lab data never belongs in this repository. Keep lab folders elsewhere (default ~/LabNetwork/<lab>).
+lab.json
+packet/
+!demo/packet/
+workspace/
+workspaces/
+exports/
+digests/
+imports/
+cache/
+identity-candidates.json
+*-bundle.json
+demo-workspace/
+private/
+
+# Python and OS clutter
+__pycache__/
+*.pyc
+.DS_Store
+.venv/

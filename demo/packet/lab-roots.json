@@ -1,0 +1,37 @@
+[
+  {
+    "id": "amara-okonkwo",
+    "match_count": 1,
+    "name": "Amara Okonkwo",
+    "role": "Associate Professor of Psychology",
+    "institution": "Lakeshore University"
+  },
+  {
+    "id": "ravi-menon",
+    "match_count": 1,
+    "name": "Ravi Menon",
+    "role": "Postdoctoral Researcher",
+    "institution": "Lakeshore University"
+  },
+  {
+    "id": "lena-fischer",
+    "match_count": 1,
+    "name": "Lena Fischer",
+    "role": "Graduate Student",
+    "institution": "Lakeshore University"
+  },
+  {
+    "id": "tomas-herrera",
+    "match_count": 1,
+    "name": "Tomás Herrera",
+    "role": "Graduate Student",
+    "institution": "Lakeshore University"
+  },
+  {
+    "id": "grace-liu",
+    "match_count": 1,
+    "name": "Grace Liu",
+    "role": "Lab Manager",
+    "institution": "Lakeshore University"
+  }
+]

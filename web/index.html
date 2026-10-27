@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Lab Network</title>
+  <link rel="icon" href="/img/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="brand">
+      <a class="wordmark" href="#/map">Lab Network</a>
+      <span class="labname" id="lab-name"></span>
+    </div>
+    <form class="search" id="search-form" role="search" autocomplete="off">
+      <input id="search-input" type="search" name="q" placeholder="Search people or a topic, for example ADHD"
+             aria-label="Search people and research topics">
+      <button type="submit" class="btn">Search</button>
+    </form>
+    <div class="topbar-actions">
+      <label class="actor">You are
+        <select id="actor-select" aria-label="Who is using Lab Network"></select>
+      </label>
+      <button type="button" class="btn" id="btn-add-contact">Add contact</button>
+      <button type="button" class="btn btn-primary" id="btn-add-note">Add note</button>
+    </div>
+  </header>
+  <nav class="viewnav" aria-label="Views">
+    <a href="#/map" data-view="map">Map</a>
+    <a href="#/people" data-view="people">People</a>
+    <a href="#/affiliations" data-view="affiliations">Affiliations</a>
+    <a href="#/search" data-view="search">Search</a>
+    <a href="#/paths" data-view="paths">Paths</a>
+    <a href="#/conferences" data-view="conferences">Conferences</a>
+    <a href="#/notes" data-view="notes">Notes</a>
+    <a href="#/data" data-view="data">Data</a>
+    <span class="viewnav-status" id="status-line"></span>
+  </nav>
+  <div class="layout">
+    <main id="main" class="views" tabindex="-1">
+      <section id="view-map" class="view view-map" data-view="map" aria-label="Network map"></section>
+      <section id="view-people" class="view view-page" data-view="people" hidden aria-label="People"></section>
+      <section id="view-affiliations" class="view view-page" data-view="affiliations" hidden aria-label="Affiliations"></section>
+      <section id="view-search" class="view view-page" data-view="search" hidden aria-label="Search results"></section>
+      <section id="view-paths" class="view view-page" data-view="paths" hidden aria-label="Paths between people"></section>
+      <section id="view-conferences" class="view view-page" data-view="conferences" hidden aria-label="Conferences"></section>
+      <section id="view-notes" class="view view-page" data-view="notes" hidden aria-label="Notes"></section>
+      <section id="view-data" class="view view-page" data-view="data" hidden aria-label="Import, export and data health"></section>
+    </main>
+    <aside id="drawer" class="drawer" hidden aria-label="Person details"></aside>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toasts" aria-live="polite"></div>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

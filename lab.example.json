@@ -1,0 +1,94 @@
+{
+  "lab": {
+    "name": "Rivera Lab",
+    "institution": "Lakeshore University",
+    "website": "https://example.org/rivera-lab/people",
+    "contactEmail": "pi@example.org"
+  },
+  "members": [
+    {
+      "id": "maria-rivera",
+      "name": "Maria Rivera",
+      "role": "Associate Professor of Psychology",
+      "institution": "Lakeshore University",
+      "orcid": "0000-0000-0000-0000",
+      "scholarUrl": "https://scholar.google.com/citations?user=EXAMPLE",
+      "facultyPage": "https://example.org/psychology/people/maria-rivera",
+      "nihProfileId": "12345678",
+      "photoUrl": "https://example.org/rivera-lab/photos/maria-rivera.jpg",
+      "photoSourceUrl": "https://example.org/rivera-lab/people",
+      "researchSummary": "Studies how sleep and family environment shape ADHD symptoms across adolescence.",
+      "researchSourceUrl": "https://example.org/psychology/people/maria-rivera",
+      "doctorate": {
+        "status": "confirmed",
+        "type": "PhD",
+        "evidence": "PhD in Clinical Psychology, Example State University, 2012, listed on the faculty page",
+        "sourceUrl": "https://example.org/psychology/people/maria-rivera"
+      },
+      "openalexId": ""
+    },
+    {
+      "id": "sam-okafor",
+      "name": "Sam Okafor",
+      "role": "Graduate Student",
+      "orcid": "",
+      "openalexId": ""
+    }
+  ],
+  "relationships": [
+    {
+      "member": "maria-rivera",
+      "name": "Joan Elder",
+      "type": "mentor",
+      "direction": "they-mentored-member",
+      "evidence": "PhD advisor at Example State University",
+      "start": "2007",
+      "end": "2012",
+      "status": "historical",
+      "institution": "Example State University"
+    },
+    {
+      "member": "maria-rivera",
+      "name": "Sam Okafor",
+      "type": "mentor",
+      "direction": "member-mentored-them",
+      "evidence": "Primary doctoral advisor",
+      "start": "2024",
+      "status": "current"
+    },
+    {
+      "member": "maria-rivera",
+      "name": "Priya Raman",
+      "type": "irta_colleague",
+      "evidence": "NIH IRTA fellows together at NIMH",
+      "start": "2010",
+      "end": "2012",
+      "status": "historical"
+    }
+  ],
+  "settings": {
+    "sinceYear": 2016,
+    "maxCoauthorsPerMember": 40,
+    "secondDegree": true,
+    "maxNewPerBridge": 5,
+    "maxPeople": 1500,
+    "library": true,
+    "weeklyUpdate": {
+      "day": "mon",
+      "at": "08:00"
+    }
+  },
+  "conferences": [
+    {
+      "short": "SRP",
+      "name": "Society for Research in Psychopathology Annual Meeting",
+      "url": "https://psychopathology.org/"
+    },
+    {
+      "short": "SRCD",
+      "name": "Society for Research in Child Development Biennial Meeting",
+      "url": "https://www.srcd.org/",
+      "frequency": "biennial, odd years"
+    }
+  ]
+}

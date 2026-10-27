@@ -1,0 +1,43 @@
+{
+  "dataset_status": "fictional demo data",
+  "saved_at": "2026-10-01T12:00:00Z",
+  "delivered_file": "notebook.json",
+  "delivered_utf8_bytes": 456615,
+  "delivered_sha256": "978ca95d7d0f8a6ecb41bd741e5349c70912250245734945b5a1cf223262dec9",
+  "counts": {
+    "people": 218,
+    "relationships": 262,
+    "meeting_notes": 4,
+    "research_requests": 0,
+    "photo_urls": 0,
+    "confirmed_photo_urls": 0,
+    "paper_associations": 294,
+    "grant_associations": 4,
+    "applied_seed_records": 0,
+    "relationship_types": {
+      "labmate": 41,
+      "mentor": 34,
+      "postdoc": 2,
+      "irta_colleague": 1,
+      "coauthor": 147,
+      "collaborator": 31,
+      "grant": 2,
+      "met": 2,
+      "committee": 2
+    },
+    "relationship_provenance": {
+      "public": 259,
+      "reported": 1,
+      "firsthand": 2
+    },
+    "relationship_review_status": {
+      "reviewed": 262
+    },
+    "relationship_confidence": {
+      "confirmed": 262
+    }
+  },
+  "limitations": [
+    "Every record is fictional."
+  ]
+}

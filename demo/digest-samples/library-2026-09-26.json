@@ -1,0 +1,50 @@
+{
+ "date": "2026-09-26",
+ "createdAt": "2026-09-26T19:30:00Z",
+ "kind": "library",
+ "newWorks": {
+  "amara-okonkwo": [
+   "Wdemoa9994345"
+  ],
+  "tomas-qureshi": [
+   "Wdemo80e1191f"
+  ],
+  "dario-achebe": [
+   "Wdemo85248e5d"
+  ],
+  "kofi-okonkwo": [
+   "Wdemo8bcf5ab5"
+  ],
+  "clara-liu": [
+   "Wdemobd6e3f45"
+  ],
+  "anouk-kaur": [
+   "Wdemo8c030a23"
+  ],
+  "leila-lindqvist": [
+   "Wdemo1f593eb5"
+  ],
+  "pavel-haddad": [
+   "Wdemo73ea8096"
+  ]
+ },
+ "newAwards": {
+  "amara-okonkwo": [
+   "nih:DEMO-R21-0999"
+  ]
+ },
+ "coverage": {
+  "people": 182,
+  "openalexLinked": 160,
+  "openalexFetched": 160,
+  "openalexPending": 0,
+  "openalexUnmatched": 22,
+  "openalexStatus": {
+   "linked": 160,
+   "unmatched": 20,
+   "ambiguous": 2
+  },
+  "nihMatched": 34
+ },
+ "stopped": ""
+}

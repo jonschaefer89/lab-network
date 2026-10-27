@@ -1,0 +1,753 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Conference networking notebook data format",
+  "description": "Data structure only. See provenance and validation notes for cross-field, URL, calendar-date and referential-integrity constraints.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "contacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1
+          },
+          "institution": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "role": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "lab": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "labName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "primaryInstitutionId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "primaryInstitution": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "primaryInstitutionSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "primaryInstitutionCheckedAt": {
+            "type": "string"
+          },
+          "labId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "labSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "labCheckedAt": {
+            "type": "string"
+          },
+          "labStatus": {
+            "type": "string",
+            "enum": [
+              "current",
+              "unknown"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "website": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "maxItems": 20
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 3000
+          },
+          "createdAt": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "seed": {
+            "type": "boolean"
+          },
+          "networkDegree": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expansionStatus": {
+            "type": "string",
+            "enum": [
+              "profile-confirmed",
+              "identity-only",
+              "unresolved"
+            ]
+          },
+          "doctorateStatus": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "not-yet-earned",
+              "unknown"
+            ]
+          },
+          "doctorateType": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "doctorateEvidence": {
+            "type": "string",
+            "maxLength": 1800
+          },
+          "doctorateSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "doctorateCheckedAt": {
+            "type": "string"
+          },
+          "photoUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "photoSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "photoAttribution": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "photoCheckedAt": {
+            "type": "string"
+          },
+          "photoConfidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "uncertain",
+              "unverified"
+            ]
+          },
+          "profileSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "profileCheckedAt": {
+            "type": "string"
+          },
+          "profileConfidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "uncertain",
+              "unverified"
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 1500
+                }
+              },
+              "required": [
+                "url",
+                "note"
+              ]
+            },
+            "maxItems": 100
+          },
+          "researchSummary": {
+            "type": "string",
+            "maxLength": 3000
+          },
+          "researchSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "researchCheckedAt": {
+            "type": "string"
+          },
+          "papers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "maxLength": 600,
+                  "minLength": 1
+                },
+                "abstract": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "abstractSourceUrl": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "abstractCheckedAt": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "year": {
+                  "type": "string",
+                  "maxLength": 30
+                },
+                "checkedAt": {
+                  "type": "string"
+                },
+                "sourceUrl": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "authors": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "selectionNote": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "type": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "publicationType": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "evidenceSourceUrl": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "authorshipEvidence": {
+                  "type": "string",
+                  "maxLength": 1800
+                },
+                "publicationStatus": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "doi": {
+                  "type": "string",
+                  "maxLength": 250
+                },
+                "verificationStatus": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "venue": {
+                  "type": "string",
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "title",
+                "url",
+                "year",
+                "checkedAt"
+              ]
+            },
+            "maxItems": 100
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "maxLength": 600,
+                  "minLength": 1
+                },
+                "abstract": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "abstractSourceUrl": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "abstractCheckedAt": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "funder": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "period": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "checkedAt": {
+                  "type": "string"
+                },
+                "grantNumber": {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                "role": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "projectId": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "applicationId": {
+                  "type": "integer"
+                },
+                "projectStartDate": {
+                  "type": "string"
+                },
+                "projectEndDate": {
+                  "type": "string"
+                },
+                "budgetStartDate": {
+                  "type": "string"
+                },
+                "budgetEndDate": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "maxLength": 600
+                },
+                "verificationMethod": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "awardId": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "start": {
+                  "type": "string"
+                },
+                "end": {
+                  "type": "string"
+                },
+                "sourceUrl": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "year": {
+                  "type": "string",
+                  "maxLength": 40
+                }
+              },
+              "required": [
+                "title",
+                "url",
+                "funder",
+                "period",
+                "checkedAt"
+              ]
+            },
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "institution",
+          "role",
+          "lab",
+          "email",
+          "website",
+          "tags",
+          "notes",
+          "createdAt"
+        ]
+      },
+      "maxItems": 3000
+    },
+    "meetings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "contactId": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "metBy": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "date": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1
+          },
+          "learning": {
+            "type": "string",
+            "maxLength": 5000
+          },
+          "followUp": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "recordedBy": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "createdAt": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "id",
+          "contactId",
+          "metBy",
+          "date",
+          "context",
+          "learning",
+          "followUp",
+          "recordedBy",
+          "createdAt"
+        ]
+      },
+      "maxItems": 10000
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "from": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "to": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "met",
+              "coauthor",
+              "collaborator",
+              "mentor",
+              "labmate",
+              "grant",
+              "postdoc",
+              "training",
+              "committee",
+              "event",
+              "irta_colleague"
+            ]
+          },
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "firsthand",
+              "reported",
+              "public"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "likely",
+              "unverified"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "reviewed",
+              "proposed",
+              "rejected"
+            ]
+          },
+          "sourceTitle": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "sourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 3000,
+            "minLength": 1
+          },
+          "checkedAt": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "relationshipStart": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "relationshipEnd": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "projectId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "projectTitle": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "relationshipStatus": {
+            "type": "string",
+            "enum": [
+              "current",
+              "historical",
+              "unknown"
+            ]
+          },
+          "relationshipStatusNote": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "relationshipLabel": {
+            "type": "string",
+            "maxLength": 180
+          },
+          "relationshipNarrative": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "relationshipNarrativeSourceUrl": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "relationshipNarrativeCheckedAt": {
+            "type": "string"
+          },
+          "attributionScope": {
+            "type": "string",
+            "enum": [
+              "individual",
+              "joint-lab",
+              "committee"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "to",
+          "type",
+          "provenance",
+          "confidence",
+          "status",
+          "sourceTitle",
+          "sourceUrl",
+          "evidence",
+          "checkedAt",
+          "createdAt"
+        ]
+      },
+      "maxItems": 10000
+    },
+    "research": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "contactId": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "depth": {
+            "type": "string",
+            "enum": [
+              "1",
+              "2"
+            ]
+          },
+          "focus": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "researching",
+              "done"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "id",
+          "contactId",
+          "depth",
+          "focus",
+          "status",
+          "createdAt"
+        ]
+      },
+      "maxItems": 1500
+    },
+    "appliedSeeds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      },
+      "maxItems": 100
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "scope": {
+          "type": "string",
+          "maxLength": 3000
+        },
+        "seedIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "maxItems": 1500
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "in-progress",
+            "bounded-complete"
+          ]
+        },
+        "sourcesReviewed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pendingSources": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolvedIdentities": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 6000
+        }
+      },
+      "required": [
+        "updatedAt",
+        "scope",
+        "seedIds",
+        "status",
+        "sourcesReviewed",
+        "pendingSources",
+        "unresolvedIdentities",
+        "notes"
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "contacts",
+    "meetings",
+    "edges",
+    "research"
+  ]
+}
