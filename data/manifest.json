@@ -1,0 +1,46 @@
+{
+ "workspace": "/lab/workspace",
+ "pyodide": "pyodide-0.29.5/",
+ "files": [
+  {
+   "path": "/lab/packet/lab-roots.json",
+   "url": "data/packet/lab-roots.json.gz",
+   "bytes": 811
+  },
+  {
+   "path": "/lab/packet/notebook.json",
+   "url": "data/packet/notebook.json.gz",
+   "bytes": 456615
+  },
+  {
+   "path": "/lab/packet/notebook.schema.json",
+   "url": "data/packet/notebook.schema.json.gz",
+   "bytes": 18702
+  },
+  {
+   "path": "/lab/workspace/changes.jsonl",
+   "url": "data/workspace/changes.jsonl.gz",
+   "bytes": 0
+  },
+  {
+   "path": "/lab/workspace/library.json",
+   "url": "data/workspace/library.json.gz",
+   "bytes": 698784
+  },
+  {
+   "path": "/lab/workspace/workspace.json",
+   "url": "data/workspace/workspace.json.gz",
+   "bytes": 548
+  },
+  {
+   "path": "/lab/workspace/digests/library-2026-09-26.json",
+   "url": "data/workspace/digests/library-2026-09-26.json.gz",
+   "bytes": 777
+  },
+  {
+   "path": "/lab/workspace/digests/library-2026-09-26.md",
+   "url": "data/workspace/digests/library-2026-09-26.md.gz",
+   "bytes": 1427
+  }
+ ]
+}
