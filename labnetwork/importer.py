@@ -28,7 +28,7 @@ from .packet import (check_contact, check_edge, check_meeting, entity_schema, sh
                      validate_schema)
 from .store import utc_now
 
-MAX_BYTES = 25 * 1024 * 1024
+MAX_BYTES = 25 * 1024 * 1024     # for files sent through the app; the import command and expand read any size
 
 CONTACT_COLUMNS = {
     "id": "id", "name": "name", "fullname": "name", "institution": "institution", "affiliation": "institution",
@@ -78,9 +78,10 @@ def _empty(v: Any) -> bool:
     return v is None or v == "" or v == [] or v == {}
 
 
-def parse(filename: str, data: bytes) -> Dict[str, Any]:
-    if len(data) > MAX_BYTES:
-        raise ImportError_(f"File is larger than {MAX_BYTES // (1024 * 1024)} MB")
+def parse(filename: str, data: bytes, size_limit: bool = True) -> Dict[str, Any]:
+    if size_limit and len(data) > MAX_BYTES:
+        raise ImportError_(f"File is larger than {MAX_BYTES // (1024 * 1024)} MB. Stop the app and import it from the "
+                           "command line instead: python3 labnetwork.py import <workspace> <file>")
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -179,8 +180,8 @@ class Importer:
 
     # -- preview ---------------------------------------------------------------
 
-    def preview(self, filename: str, data: bytes) -> Dict[str, Any]:
-        parsed = parse(filename, data)
+    def preview(self, filename: str, data: bytes, size_limit: bool = True) -> Dict[str, Any]:
+        parsed = parse(filename, data, size_limit)
         digest = sha256_bytes(data)
         batch_id = ("imp-" + utc_now().replace(":", "").replace("-", "")[:15] + "-" + digest[:6] +
                     uuid.uuid4().hex[:4])

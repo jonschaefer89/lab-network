@@ -135,8 +135,9 @@ Run it in the background: the network takes a few minutes and the research libra
 ### Step 5. Make sure the first and second degree are complete
 
 Onboard keeps each lab member's most frequent coauthors (40 by default) and their frequent coauthors. `expand`
-adds the rest: every coauthor on each member's papers with 30 or fewer authors (among their 200 newest works), and
-each first-degree person's frequent coauthors. So the first dry run after onboarding usually lists people to add:
+adds the rest: every coauthor on each member's papers with 30 or fewer authors, and each first-degree person's
+coauthors on two or more such papers since the start year. So the first dry run after onboarding usually lists people
+to add:
 
 ```bash
 python3 labnetwork.py expand <LABDIR>/workspace --dry-run
@@ -243,4 +244,4 @@ attributed to them. Before any write, show the user the exact change and get the
   no file to delete.
 - **The map is crowded:** use "1st degree", the people filters, or the Relationships menu. Smaller
   `maxCoauthorsPerMember` and `maxNewPerBridge` values in `lab.json` shrink only the starting build; `expand` adds
-  the rest of each member's coauthors.
+  the rest of each member's coauthors, and `expand --per-person N` adds at most N people for each first-degree person.

@@ -20,6 +20,15 @@ from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_SCHEMA = os.path.join(HERE, "schema", "notebook.schema.json")
+_bundled: Dict[str, Any] = {}
+
+
+def bundled_schema() -> Dict[str, Any]:
+    """This kit's schema. A packet keeps the copy it was built with, which an older kit may have made stricter (it
+    allowed 3,000 people and 10,000 relationships); the notebook as edited since holds records this kit wrote."""
+    if not _bundled:
+        _bundled.update(_read_json(BUNDLED_SCHEMA))
+    return _bundled
 
 
 class PacketError(Exception):

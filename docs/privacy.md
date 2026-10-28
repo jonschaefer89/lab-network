@@ -36,7 +36,8 @@ lab folder (`cache/`); `refresh` and the live check on a person's page keep none
 
 Without an API key, OpenAlex counts requests against a free daily allowance shared by everyone on your network
 address, and its responses suggest that an assistant register a key with your email. Lab Network does not register
-one; `expand` and `library` stop before reaching the allowance (`--budget`, default $0.08 of the $0.10 day).
+one; `expand` and `library` stop before reaching the allowance (`--budget`, default $0.08 of the $0.10 day, or $0.90
+of the $1 a day with a key).
 
 The weekly update runs on your computer under your user account and sends the same lookups as
 `library WORKSPACE --update`. The demo lab sends nothing: its library comes with it, and its lookups are off.

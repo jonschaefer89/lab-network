@@ -20,6 +20,7 @@ sys.path.insert(0, ROOT)
 
 from labnetwork import cli, site  # noqa: E402
 from labnetwork.browser import Backend  # noqa: E402
+from labnetwork.packet import BUNDLED_SCHEMA  # noqa: E402
 from labnetwork.service import Service  # noqa: E402
 from labnetwork.store import Workspace  # noqa: E402
 from tests.fixtures import write_packet  # noqa: E402
@@ -139,6 +140,22 @@ class SiteTests(unittest.TestCase):
         log = [json.loads(line) for line in self.unpack(self.entries()["/lab/workspace/changes.jsonl"]).splitlines()]
         self.assertEqual(sorted(e["op"] for e in log), ["meeting.meta", "workspace.note"])     # no history
 
+    def test_a_notebook_past_the_packets_schema_limits_still_passes_and_builds(self):
+        # A packet keeps the schema of the kit that built it; an older kit allowed fewer people than this one.
+        with open(BUNDLED_SCHEMA, encoding="utf-8") as f:
+            schema = json.load(f)
+        packet = Workspace(self.ws_path).packet_dir()
+        schema["properties"]["contacts"]["maxItems"] = len(Service(Workspace(self.ws_path)).packet.notebook["contacts"])
+        with open(os.path.join(packet, "notebook.schema.json"), "w", encoding="utf-8") as f:
+            json.dump(schema, f)
+        svc = Service(Workspace(self.ws_path))
+        svc.create_contact({"fields": {"name": "Robin Onemore", "institution": "Hill College"}}, "Pat")
+        self.assertTrue(svc.report["ok"])
+        self.assertTrue(svc.validation()["current"]["ok"])
+        self.build()
+        with open(BUNDLED_SCHEMA, encoding="utf-8") as f:
+            self.assertEqual(json.loads(self.unpack(self.entries()["/lab/packet/notebook.schema.json"])), json.load(f))
+
     def test_snapshot_is_marked_as_a_shared_copy_and_passes_its_checks(self):
         self.build()
         config = json.loads(self.unpack(self.entries()["/lab/workspace/workspace.json"]))
@@ -159,6 +176,19 @@ class SiteTests(unittest.TestCase):
             with open(dst, "wb") as f:
                 f.write(self.unpack(e))
         return Backend(os.path.join(lab, "lab", "workspace"))
+
+    def test_the_copy_opens_with_the_checks_its_build_ran(self):
+        self.build()
+        with mock.patch("labnetwork.service.validation_report", side_effect=AssertionError("checked again")):
+            backend = self.unpacked_backend()
+        self.assertTrue(backend.svc.report["ok"])
+        self.assertEqual(backend.svc.report["packetPath"], backend.svc.packet.path)
+        # The local workspace is no shared copy, and checks its packet itself.
+        with open(os.path.join(self.ws_path, "packet-checks.json"), "w", encoding="utf-8") as f:
+            json.dump(backend.svc.report, f)
+        with mock.patch("labnetwork.service.validation_report", side_effect=AssertionError("checked")):
+            with self.assertRaises(AssertionError):
+                Service(Workspace(self.ws_path))
 
     def test_backend_answers_reads_and_refuses_writes(self):
         self.build()

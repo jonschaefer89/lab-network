@@ -66,6 +66,24 @@ def activities(client: Client, orcid: str) -> Tuple[List[Dict[str, Any]], List[D
     return edus, [_emp(e) for e in _summaries(data.get("employments"), "employment-summary")]
 
 
+def work_dois(client: Client, orcid: str) -> List[Tuple[str, Optional[int]]]:
+    """(DOI, publication year) for each work the person lists on their ORCID record that has a DOI, in one request.
+    DOIs are lowercase, without the https://doi.org/ prefix."""
+    data = client.get(f"{API}/{clean(orcid)}/works") or {}
+    out = []
+    for g in data.get("group") or []:
+        doi = ""
+        for e in (g.get("external-ids") or {}).get("external-id") or []:
+            if (e.get("external-id-type") or "").lower() == "doi":
+                doi = ((e.get("external-id-normalized") or {}).get("value") or e.get("external-id-value") or "")
+                break
+        doi = re.sub(r"^(https?://(dx\.)?doi\.org/|doi:)", "", doi.strip().lower())
+        if doi:
+            s = (g.get("work-summary") or [{}])[0]
+            out.append((doi, _year(s.get("publication-date"))))
+    return out
+
+
 def doctorate(edus: List[Dict[str, Any]], orcid: str, checked: str) -> Optional[Dict[str, str]]:
     """A completed doctorate listed on the ORCID record, or None (which is not evidence of no doctorate)."""
     for e in sorted(edus, key=lambda x: -(x["endYear"] or 0)):

@@ -416,7 +416,7 @@
           "createdAt"
         ]
       },
-      "maxItems": 3000
+      "maxItems": 50000
     },
     "meetings": {
       "type": "array",
@@ -626,7 +626,7 @@
           "createdAt"
         ]
       },
-      "maxItems": 10000
+      "maxItems": 200000
     },
     "research": {
       "type": "array",

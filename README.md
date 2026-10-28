@@ -61,8 +61,8 @@ and kind of evidence, followed by all of their recorded relationships grouped by
 
 ### Read their research record
 
-For everyone within two degrees, the research library holds their OpenAlex summary, up to 50 recent papers, and their
-NIH and NSF awards. Sources, dates and rules sit behind the small "i" marks, so the page shows the facts first.
+For the researchers within two degrees, the research library holds their OpenAlex summary, up to 50 recent papers,
+and their NIH and NSF awards. Of the people `expand` adds to the second degree, it holds those with a confirmed doctorate and a known institution and position. Sources, dates and rules sit behind the small "i" marks, so the page shows the facts first.
 
 ![A person's research section: OpenAlex summary, recent papers, and the details behind an "i" mark](docs/img/research.png)
 
@@ -99,8 +99,8 @@ every note and the open follow-ups.
 
 ### Stay current
 
-A weekly update on your computer adds new papers and NIH and NSF awards for everyone within two degrees and writes a
-digest, which the Data page shows under Updates.
+A weekly update on your computer adds new papers and NIH and NSF awards for the people in the research library and
+writes a digest, which the Data page shows under Updates.
 
 ![A weekly digest of new papers and awards](docs/img/updates.png)
 
@@ -157,15 +157,23 @@ python3 labnetwork.py serve ~/LabNetwork/my-lab/workspace --open
 ### Fill in the first and second degree
 
 Onboarding keeps each lab member's most frequent coauthors (40 by default) and up to 5 frequent coauthors of each of
-them. `expand` adds the rest: every coauthor on lab members' papers with 30 or fewer authors, and the frequent coauthors of everyone
-in the first degree.
+them. `expand` adds the rest: every coauthor on lab members' papers with 30 or fewer authors, and everyone who shares two
+or more such papers since the start year with someone in the first degree, including people the same run joins to a
+lab member. A preprint and its article count as one paper, and corrections not at all. It reads every OpenAlex record
+linked to a person and the papers they list on ORCID. OpenAlex sometimes files two researchers with the same name under
+one record, so a paper counts only when it names someone already in the network (other than people that `expand` or
+onboarding added to the second degree), was recorded with a lab member, or lists the person at their recorded
+institution or at an institution where two such papers list them.
+`--per-person N` adds at most N people for each first-degree person.
 
 ```bash
 python3 labnetwork.py expand ~/LabNetwork/my-lab/workspace --dry-run   # who would be added, and the cost
 python3 labnetwork.py expand ~/LabNetwork/my-lab/workspace             # apply, as one import batch
 ```
 
-A second run adds only the missing records, so a run that plans nothing confirms both degrees are complete.
+A second run adds only the missing records, so a run that plans nothing confirms both degrees are complete. If the app
+is running, `expand` applies the plan through it, which accepts plans up to 25 MB; for a larger plan, `expand` asks
+you to stop the app and run it again.
 
 ### The research library
 

@@ -29,7 +29,7 @@ import urllib.request
 import zipfile
 from typing import Any, Callable, Dict, List, Optional
 
-from .store import CONFIG_NAME, LOG_NAME, Workspace
+from .store import CHECKS_NAME, CONFIG_NAME, LOG_NAME, Workspace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.dirname(HERE)
@@ -42,7 +42,7 @@ PYODIDE_SHA512 = "TkYrUv9m8QmfImADKRmpwZulL48E0uUaBSO+dvRQKyAJc0qh9gu7jn8btyHPh3
 PYODIDE_FILES = ("pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json")
 PYODIDE_DIR = f"pyodide-{PYODIDE_VERSION}"     # versioned, so browsers may cache it for good
 
-PACKET_FILES = ("lab-roots.json", "notebook.schema.json")          # besides the snapshot's own notebook.json
+PACKET_FILES = ("lab-roots.json",)    # besides the snapshot's own notebook.json and this kit's schema
 WORKSPACE_FILES = ("library.json", "conferences.json", "topic-aliases.json")
 SETTINGS_KEPT = ("degreeLimit", "defaultFilters", "demo", "lastRefresh")
 MARKER = ".labnetwork-site"
@@ -177,7 +177,7 @@ def _swap(stage: str, out_dir: str) -> None:
 
 def _snapshot(svc, root: str, made_at: str, how_to_add: str) -> None:
     """The notebook as it is now, as a new packet beside a workspace that holds the derived files."""
-    from .packet import sha256_bytes
+    from .packet import BUNDLED_SCHEMA, sha256_bytes
 
     ws = svc.ws
     pdir, wdir = os.path.join(root, "packet"), os.path.join(root, "workspace")
@@ -194,6 +194,7 @@ def _snapshot(svc, root: str, made_at: str, how_to_add: str) -> None:
         src = os.path.join(ws.packet_dir(), name)
         if os.path.isfile(src):
             shutil.copyfile(src, os.path.join(pdir, name))
+    shutil.copyfile(BUNDLED_SCHEMA, os.path.join(pdir, "notebook.schema.json"))    # see packet.bundled_schema
     for name in WORKSPACE_FILES:
         src = os.path.join(ws.path, name)
         if os.path.isfile(src):
@@ -248,12 +249,15 @@ def _working_copy(ws: Workspace, dest: str) -> str:
 
 
 def _check_snapshot(wdir: str) -> None:
-    """Open the snapshot as the browser will, so a copy that cannot start, or fails its checks, is never written."""
+    """Open the snapshot as the browser will, so a copy that cannot start, or fails its checks, is never written.
+    The checks go into the copy, and the browser uses them instead of running them again."""
     from .service import Service
     svc = Service(Workspace(wdir))
     failed = [c["check"] for c in svc.report["checks"] if not c["ok"]]
     if failed:
         raise SiteError("The copy's notebook fails these packet checks: " + "; ".join(failed))
+    with open(os.path.join(wdir, CHECKS_NAME), "w", encoding="utf-8") as f:
+        json.dump(dict(svc.report, packetPath=""), f, ensure_ascii=False)
 
 
 def _copy_web(out_dir: str) -> None:

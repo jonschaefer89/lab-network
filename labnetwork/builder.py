@@ -39,7 +39,7 @@ DEFAULT_SETTINGS = {
     "secondDegree": True,
     "maxWorksPerBridge": 60,
     "maxNewPerBridge": 5,
-    "maxPeople": 1500,               # keeps the map readable; the schema allows 3000
+    "maxPeople": 1500,               # keeps the map readable; expand adds the rest of the second degree
     "maxPapersPerPerson": 12,
     "orcidLookups": True,
     "maxOrcidLookups": 250,

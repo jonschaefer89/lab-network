@@ -1,14 +1,17 @@
 """Edits, persistence, imports, exports and conflict handling."""
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from labnetwork import exporter  # noqa: E402
+from labnetwork import cli, exporter  # noqa: E402
 from labnetwork.importer import Importer, ImportError_  # noqa: E402
 from labnetwork.packet import sha256_file  # noqa: E402
 from labnetwork.service import EditConflict, Service, ServiceError  # noqa: E402
@@ -156,6 +159,28 @@ class ImportExportTests(unittest.TestCase):
         Importer(other).apply(prev2["batchId"], {}, "Pat")
         self.assertEqual(len(other.nb.events), before + 1)  # only the batch record itself
         self.assertEqual(snapshot(other), snapshot(self.svc))
+
+    def test_a_bundle_too_large_for_the_app_imports_from_the_command_line(self):
+        self.edit_some(self.svc)
+        data = self.bundle_bytes(self.svc)
+        path = os.path.join(self.tmp, "bundle.json")
+        with open(path, "wb") as f:
+            f.write(data)
+        other = self.second_workspace()
+        with mock.patch("labnetwork.importer.MAX_BYTES", len(data) - 1):
+            with self.assertRaises(ImportError_) as refused:
+                Importer(other).preview("bundle.json", data)          # as the app receives an upload
+            self.assertIn("python3 labnetwork.py import", str(refused.exception))
+            # The command line writes only while the app is stopped (its lock names a live process).
+            with open(other.ws.lock_path, "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getppid(), "port": 8765}, f)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(cli.main(["import", other.ws.path, path, "--yes"]), 1)
+            self.assertIn("Stop it first", err.getvalue())
+            os.remove(other.ws.lock_path)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["import", other.ws.path, path, "--yes"]), 0)
+        self.assertEqual(snapshot(reopen(other)), snapshot(self.svc))
 
     def test_bundle_conflict_is_explicit(self):
         self.svc.update_contact("c1", {"set": {"role": "Full Professor"}}, "Pat")

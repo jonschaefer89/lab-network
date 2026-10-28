@@ -84,9 +84,10 @@ Two things keep that visible:
   topic searches, and the counts line says how many. They can still be found by name.
 - **Collection status.** `labnetwork.py expand` records, for each first-degree person, whether their coauthors were
   collected, and on what rule. The counts line above the map says how many first-degree people that covers; each
-  person's page says what happened for them (collected, not found in OpenAlex, several possible matches, not looked up
-  because no doctorate or research relationship is recorded, not reached because the run stopped at its spending
-  limit, or undone).
+  person's page says what happened for them (collected, with how many OpenAlex coauthors they have; not found in
+  OpenAlex; several possible matches; not looked up because no doctorate or research relationship is recorded; not
+  collected because none of their OpenAlex works connects to anything recorded about them; not reached because the run
+  stopped at its spending limit; or undone).
 
 ## Affiliations
 

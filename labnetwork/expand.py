@@ -1,29 +1,41 @@
 """Fill in the first and second degree from public coauthorship records.
 
-`expand` reads OpenAlex (and ORCID, for new people's degrees and positions) and sends what it finds through the
-importer as one batch, like any other import. Nothing in the packet changes, and `undo-import` reverses the batch.
+`expand` reads OpenAlex (and ORCID, for the papers people list there and for new people's degrees and positions) and
+sends what it finds through the importer as one batch, like any other import. Nothing in the packet changes, and
+`undo-import` reverses the batch.
 
-1. Lab members are looked up by name and accepted only when their OpenAlex works include papers already recorded
-   for them (two or more; one when only one is recorded).
+A person's OpenAlex records are the ones linked on their record, else the research library's match (with the records
+the library joined to them by ORCID iD); a record marked as not theirs never counts.
+
+1. Lab members without OpenAlex records are looked up by name and accepted only when their OpenAlex works include
+   papers already recorded for them (two or more; one when only one is recorded).
 2. First degree: every coauthor of a lab member on papers with 30 or fewer authors is connected to that member.
    Coauthors already in the notebook gain a coauthor record if they lack one; the rest are added.
-3. A first-degree person already in the notebook is identified on the lab members' OpenAlex papers: the author
-   whose name matches theirs, preferring a paper already recorded between them. People without a shared paper who
-   have a confirmed doctorate or a research relationship are looked up by name and accepted only when exactly one
-   candidate's institutions match theirs. Everyone else is not looked up.
-4. Second degree: for each identified first-degree person, coauthors are counted over works since the start year
-   (papers with 30 or fewer authors). Coauthors already in the notebook gain a coauthor record if they lack one.
-   Others with at least `min_shared` shared works are added until `per_person` of the person's coauthors are
-   expansion additions (from this run or an earlier one), so a second run adds only the missing records.
+3. A first-degree person already in the notebook without OpenAlex records is identified on the lab members' OpenAlex
+   papers: the author whose name matches theirs, preferring a paper already recorded between them. People without a
+   shared paper who have a confirmed doctorate or a research relationship are looked up by name and accepted only
+   when exactly one candidate's institutions match theirs. Everyone else is not looked up.
+4. Second degree: for each identified first-degree person, every work since the start year with 30 or fewer authors
+   is read from all of their records, with the papers they list on their ORCID record that OpenAlex files under
+   other records. OpenAlex sometimes files two researchers with the same name under one record, so a work counts only
+   when it connects to what is known about the person: it names someone in the network (other than people whose only
+   tie is to this person, and people an expand run or onboarding added to the second degree), was recorded with a lab
+   member, or lists them at their recorded institution, or at an institution two such works list them at. Coauthors
+   already in the notebook gain a coauthor record if they lack one. Everyone else with at least `min_shared` shared
+   works is added; with `per_person`, only until that many of the person's coauthors are expansion additions (from
+   this run or an earlier one), so a second run adds only the missing records.
 
 A coauthor whose name matches someone already in the notebook, with no shared institution or relationship to
-confirm it is the same person, is held back and listed instead of added. Everyone checked is recorded in a
-collection note (a workspace.note event), so the app can say whose connections were collected.
+confirm it is the same person, is held back and listed instead of added. So is a new person whose OpenAlex record
+carries the ORCID iD of someone in the notebook or of another new person: they may be one researcher with two
+records. Everyone checked is recorded in a collection note (a workspace.note event), so the app can say whose
+connections were collected.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -33,22 +45,30 @@ from .connectors import orcid as oc
 from .connectors.http import BudgetReached, Client, HttpError
 from .graph import TieFilter
 from .importer import Importer
-from .model import norm_text
+from .model import name_key, norm_text
 from .refresh import _held, _running_port, openalex_links
 from .search import _paper_ids, _strip_year
-from .service import Service, slugify
+from .service import Service, _initials_match, slugify
 from .store import Workspace, today, utc_now
 
 MAX_AUTHORS = 30
+MAX_PAGES = 50                  # 10,000 works on a person's records, far more than anyone publishes since the start year
+DOIS_PER_REQUEST = 50
 WORK_SELECT = "id,doi,ids,title,publication_year,authorships"
 SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "phd", "md"}
 RESEARCH_TYPES = {"coauthor", "grant", "collaborator"}
+ORCID_RX = re.compile(r"orcid\.org/(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", re.I)
+NOTICE_RX = re.compile(r"\s*((author |publisher )?(correction|erratum|corrigendum)(\s*:|\s+(to|notice)\b|\s*$)"
+                       r"|retract(ion|ed)\b|notice of retraction\b|expression of concern\b)", re.I)  # not papers
+SECOND_DEGREE_TAGS = {"expand-second-degree", "openalex-second-degree"}       # added by expand, or by onboarding
 
 STATUS_TEXT = {
     "collected": "coauthors collected from OpenAlex",
     "not-found": "not found in OpenAlex",
     "ambiguous": "several OpenAlex authors match; not collected until someone confirms which is theirs",
     "not-looked-up": "not looked up: no confirmed doctorate or research relationship recorded",
+    "unanchored": ("no OpenAlex work of theirs since the start year shares a coauthor with the network, a paper "
+                   "recorded with a lab member, or their recorded institution"),
     "stopped": "not reached: the run stopped at its spending limit",
     "undone": "an earlier collection was undone",
 }
@@ -130,6 +150,7 @@ def _work_ids(w: Dict[str, Any]) -> List[str]:
 
 def _works(client: Client, aids: List[str], since: str = "", max_authors: Optional[int] = MAX_AUTHORS,
            per_page: int = 200, select: str = WORK_SELECT, use_cache: bool = True) -> List[Dict[str, Any]]:
+    """The newest works on these author records: one page of `per_page`."""
     flt = "authorships.author.id:" + "|".join(oa.short_id(a) for a in aids)
     if max_authors:
         flt += f",authors_count:<{max_authors + 1}"
@@ -141,6 +162,80 @@ def _works(client: Client, aids: List[str], since: str = "", max_authors: Option
     return data.get("results", [])
 
 
+def _all_works(client: Client, aids: List[str], since: str = "", max_authors: Optional[int] = MAX_AUTHORS,
+               select: str = WORK_SELECT) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every work on these author records, newest first, read page by page. The flag says the reading stopped after
+    MAX_PAGES pages."""
+    flt = "authorships.author.id:" + "|".join(oa.short_id(a) for a in aids)
+    if max_authors:
+        flt += f",authors_count:<{max_authors + 1}"
+    if since:
+        flt += f",from_publication_date:{since}"
+    out: List[Dict[str, Any]] = []
+    cursor = "*"
+    for _ in range(MAX_PAGES):
+        data = client.get(f"{oa.API}/works", oa._params(client, {"filter": flt, "sort": "publication_date:desc",
+                                                                 "per-page": 200, "select": select, "cursor": cursor}))
+        batch = data.get("results", [])
+        out += batch
+        cursor = (data.get("meta") or {}).get("next_cursor")
+        if not batch or not cursor:
+            return out, False
+    return out, True
+
+
+def _orcid_listed(client: Client, orcid: str, have: List[Dict[str, Any]], since_year: int) -> List[Dict[str, Any]]:
+    """Works a person lists on their ORCID record that OpenAlex has (since the start year, 30 or fewer authors) and
+    that are not among `have`, their works under their own OpenAlex records."""
+    have_ids = {w.get("id") for w in have}
+    have_dois = {(w.get("doi") or "").lower().replace("https://doi.org/", "") for w in have}
+    dois = sorted({d for d, year in oc.work_dois(client, orcid)
+                   if d not in have_dois and (year is None or year >= since_year - 1) and not set(d) & set(",|")})
+    out: List[Dict[str, Any]] = []
+    for start in range(0, len(dois), DOIS_PER_REQUEST):
+        flt = (f"doi:{'|'.join(dois[start:start + DOIS_PER_REQUEST])},authors_count:<{MAX_AUTHORS + 1},"
+               f"from_publication_date:{since_year}-01-01")
+        data = client.get(f"{oa.API}/works", oa._params(client, {"filter": flt, "per-page": 200, "select": WORK_SELECT}))
+        for w in data.get("results", []):
+            if w.get("id") not in have_ids:
+                have_ids.add(w.get("id"))
+                out.append(w)
+    return out
+
+
+def _selves(w: Dict[str, Any], name: str, orcid: str) -> Set[str]:
+    """The authorships on a work that name the person: their ORCID iD, or a name that can be theirs."""
+    out = set()
+    for a in w.get("authorships") or []:
+        au = a.get("author") or {}
+        if not au.get("id"):
+            continue
+        if (orcid and oc.clean(au.get("orcid") or "").upper() == orcid) or \
+                name_score(name, au.get("display_name") or a.get("raw_author_name") or ""):
+            out.add(oa.short_id(au["id"]))
+    return out
+
+
+def _author_details(client: Client, aids: List[str], details: Dict[str, Dict[str, Any]],
+                    errors: List[str]) -> Tuple[List[str], Optional[BudgetReached]]:
+    """Read new people's OpenAlex author records into `details`, 50 to a request. Returns the people whose records were
+    not read, so that their ORCID iD could not be checked, and the spending stop if the run reached one."""
+    unread: List[str] = []
+    for start in range(0, len(aids), 50):
+        chunk = aids[start:start + 50]
+        try:
+            details.update(oa.get_authors(client, chunk))
+        except BudgetReached as exc:
+            errors.append(f"The run reached its spending limit before reading the OpenAlex author records of "
+                          f"{len(aids) - start} new people; they were not added, and the next run adds them.")
+            return unread + aids[start:], exc
+        except HttpError as exc:
+            errors.append(f"The OpenAlex author records of {len(chunk)} new people could not be read ({exc}); they "
+                          "were not added, and the next run adds them.")
+            unread += chunk
+    return unread, None
+
+
 def _authorships(w: Dict[str, Any]):
     for a in w.get("authorships") or []:
         au = a.get("author") or {}
@@ -150,25 +245,60 @@ def _authorships(w: Dict[str, Any]):
 
 
 def _coauthor_counts(works: List[Dict[str, Any]], mine: Set[str], max_authors: int = MAX_AUTHORS):
-    """Shared-work counts, latest shared work, names and institutions for each coauthor (newest works first)."""
+    """Shared-work counts, latest shared work, names and institutions for each coauthor (newest works first). Works
+    with the same DOI or title (a preprint and its article) count once, and corrections and retraction notices not at
+    all."""
     counts: Counter = Counter()
     latest: Dict[str, Dict[str, Any]] = {}
     names: Dict[str, str] = {}
     insts: Dict[str, Set[str]] = defaultdict(set)
-    for w in works:
-        if len(w.get("authorships") or []) > max_authors:
+    paper: Dict[str, int] = {}          # paper identifier -> the first work that had it
+    seen: Set[Tuple[str, int]] = set()
+    for n, w in enumerate(works):
+        if len(w.get("authorships") or []) > max_authors or NOTICE_RX.match(oa.work_title(w) or ""):
             continue
-        seen = set()
+        ids = _work_ids(w)
+        p = next((paper[i] for i in ids if i in paper), n)
+        for i in ids:
+            paper.setdefault(i, p)
         for aid, nm, ins in _authorships(w):
-            if aid in mine or aid in seen:
+            if aid in mine or (aid, p) in seen:
                 continue
-            seen.add(aid)
+            seen.add((aid, p))
             counts[aid] += 1
-            latest.setdefault(aid, w)
+            if aid not in latest or (w.get("publication_year") or 0) > (latest[aid].get("publication_year") or 0):
+                latest[aid] = w             # papers listed on ORCID come after the newest-first OpenAlex list
             names[aid] = nm
             insts[aid].update(ins)
     ranked = sorted(counts, key=lambda a: (-counts[a], -(latest[a].get("publication_year") or 0)))
     return ranked, counts, latest, names, insts
+
+
+def _anchored(works: List[Dict[str, Any]], mine: Set[str],
+              anchors: Callable[[Dict[str, Any]], bool]) -> Tuple[List[Dict[str, Any]], int]:
+    """The works that count for a person, and how many were left out. A work counts when it anchors the person by
+    itself (`anchors`), or when their own authorship (`mine`) on it lists an institution that at least two such works
+    list them at. Neither a shared coauthor nor an institution on one work joins works: a namesake filed under the same
+    record shares both across their own papers, and one anchor met by chance would bring in all of them."""
+    def places(w: Dict[str, Any]) -> Set[str]:
+        return {x["id"] for a in w.get("authorships") or []
+                if oa.short_id((a.get("author") or {}).get("id") or "") in mine
+                for x in a.get("institutions") or [] if x.get("id")}
+    direct = [anchors(w) for w in works]
+    paper: Dict[str, int] = {}              # as in _coauthor_counts: a preprint and its article are one paper
+    seen: Dict[str, Set[int]] = defaultdict(set)        # institution ID -> papers that count by themselves there
+    for n, (w, d) in enumerate(zip(works, direct)):
+        if not d or NOTICE_RX.match(oa.work_title(w) or ""):
+            continue
+        ids = _work_ids(w)
+        p = next((paper[i] for i in ids if i in paper), n)
+        for i in ids:
+            paper.setdefault(i, p)
+        for i in places(w):
+            seen[i].add(p)
+    theirs = {i for i, ps in seen.items() if len(ps) >= 2}
+    kept = [w for w, d in zip(works, direct) if d or places(w) & theirs]
+    return kept, len(works) - len(kept)
 
 
 # --------------------------------------------------------------------------- plan
@@ -176,30 +306,81 @@ def _coauthor_counts(works: List[Dict[str, Any]], mine: Set[str], max_authors: i
 class _Plan:
     """Collects new people, new coauthor records and held-back names while the steps run."""
 
-    def __init__(self, svc: Service, since_year: int):
+    def __init__(self, svc: Service, since_year: int, lib: Optional[Dict[str, Any]] = None):
+        from .library import author_ids
         self.nb = svc.nb
         self.contacts = self.nb.records["contacts"]
         self.active = {pid for pid, _ in self.nb.active("contacts")}
+        self.lab = set(self.nb.root_ids)
         self.g = svc.graph(TieFilter())
         self.since_year = since_year
+        self.lib_people = (lib or {}).get("people") or {}
         self.by_family: Dict[str, List[str]] = defaultdict(list)
         for pid in self.active:
             for k in {family_key(self.contacts[pid]["name"])} | surname_tokens(self.contacts[pid]["name"]):
                 self.by_family[k].append(pid)
+        # The names the importer compares (Service.possible_duplicates). Whoever it would hold back is held back here,
+        # so that a dry run plans what the import adds.
+        self.by_key: Dict[str, str] = {}
+        self.by_surname: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        for pid in sorted(self.active):
+            k = name_key(self.contacts[pid]["name"])
+            if k:
+                self.by_key.setdefault(k, pid)
+                self.by_surname[k.split()[-1]].append((k, pid))
+        self.new_keys: Dict[str, str] = {}                  # name key -> planned person ID
+        # A person's OpenAlex records: the links on their record (with the records the library joined to one of them
+        # by ORCID iD), else the research library's match; never a record marked as not theirs.
         self.oa_of: Dict[str, List[str]] = {}
-        self.by_oa: Dict[str, str] = {}
-        for pid in self.active:
-            ids = openalex_links(self.nb, pid)           # every record linked on their record, unless marked not theirs
+        self.voided: Dict[str, Set[str]] = {}
+        self.oa_basis: Dict[str, str] = {}
+        self.oa_source: Dict[str, str] = {}
+        for pid in sorted(self.active):
+            ids = openalex_links(self.nb, pid)
             if ids:
-                self.oa_of[pid] = ids
-                for a in ids:
-                    self.by_oa[a] = pid
+                self.oa_of[pid], self.oa_source[pid] = ids, "record"
+                self.oa_basis[pid] = ("OpenAlex link on their record" if len(ids) == 1 else
+                                      f"{len(ids)} OpenAlex links on their record")
+        for pid in sorted(self.active):
+            o = self.library_openalex(pid)
+            if not o:
+                continue
+            # A record marked as not theirs voids the library's match that holds it, with the records joined to it by
+            # ORCID iD (one researcher); none of them counts as theirs until the library makes a new match.
+            no = self.nb.openalex_not_theirs(pid)
+            if pid in self.oa_of:
+                group = (o.get("orcidGroup") or {}).get("ids") or []
+                extra = [a for a in group if a not in self.oa_of[pid]] if set(group) & set(self.oa_of[pid]) else []
+                if set(group) & set(no):
+                    self.voided[pid], extra = set(extra), []
+                if extra:
+                    self.oa_of[pid] = self.oa_of[pid] + extra
+                    self.oa_basis[pid] += (f", and {len(extra)} more record{'s' if len(extra) > 1 else ''} with "
+                                           "the same ORCID iD, joined by the research library")
+            else:
+                ids = author_ids(o)
+                if set(ids) & set(no):
+                    self.voided[pid] = set(ids)
+                elif ids:
+                    self.oa_of[pid], self.oa_source[pid] = ids, "library"
+                    self.oa_basis[pid] = f"the research library's match ({o.get('basis') or 'no basis recorded'})"
+        self.by_oa: Dict[str, str] = {}
+        for pid, ids in self.oa_of.items():                # links on records first: the first person listed keeps an ID
+            for a in ids:
+                self.by_oa.setdefault(a, pid)
         self.pairs = {tuple(sorted((e["from"], e["to"]))) for _, e in self.nb.active("edges") if e["type"] == "coauthor"}
         self.new_people: Dict[str, Dict[str, Any]] = {}     # OpenAlex id -> plan
+        self.new_names: Dict[str, str] = {}                 # planned person ID -> name
         self.edges: List[Dict[str, Any]] = []
         self.edge_ids: Set[str] = set()
         self.held: List[Dict[str, Any]] = []
         self.held_ids: Set[str] = set()
+        self.orcid_held: Set[str] = set()                   # OpenAlex ids held back: a shared or unchecked ORCID iD
+
+    def library_openalex(self, pid: str) -> Dict[str, Any]:
+        """The research library's OpenAlex entry for a person, when it links them to records."""
+        o = (self.lib_people.get(pid) or {}).get("openalex") or {}
+        return o if o.get("status") == "linked" else {}
 
     def added_by_expansion(self, pid: str) -> bool:
         """Whether a person was added to the second degree by an earlier expansion (counts toward the cap)."""
@@ -212,7 +393,16 @@ class _Plan:
     def name(self, pid: str) -> str:
         if pid in self.contacts:
             return self.contacts[pid]["name"]
-        return next((p["name"] for p in self.new_people.values() if p["id"] == pid), pid)
+        return self.new_names.get(pid, pid)
+
+    def orcids(self, pid: str) -> List[str]:
+        """ORCID iDs for someone in the notebook: on their record first, then on their OpenAlex records."""
+        c = self.contacts[pid]
+        found = [m for s in c.get("sources") or [] for m in ORCID_RX.findall(s.get("url", ""))]
+        found += ORCID_RX.findall(c.get("profileSourceUrl", ""))
+        o = self.library_openalex(pid)
+        found += [(o.get("summary") or {}).get("orcid", ""), (o.get("orcidGroup") or {}).get("orcid", "")]
+        return list(dict.fromkeys(x for x in (oc.clean(f).upper() for f in found) if x))
 
     def known_papers(self, pid: str) -> List[Set[str]]:
         """Papers already recorded for a person (their profile and their coauthor records), each as its set of
@@ -238,30 +428,47 @@ class _Plan:
         return papers
 
     def known_ids(self, pid: str) -> Set[str]:
-        return set().union(*self.known_papers(pid)) if self.known_papers(pid) else set()
+        return set().union(*self.known_papers(pid))
+
+    def lab_paper_ids(self, pid: str) -> Set[str]:
+        """The papers on someone's coauthor records with lab members. Their profile papers and other coauthor records
+        may have come from their own OpenAlex record, so only these show which of its works are theirs."""
+        out: Set[str] = set()
+        for other in self.g.nbrs.get(pid, ()):
+            if other in self.lab:
+                for e in self.g.records_between(pid, other):
+                    if e["type"] == "coauthor":
+                        title, _ = _strip_year(e.get("sourceTitle", ""))
+                        out.update(_paper_ids(title, e.get("sourceUrl", "")))
+        return out
 
     def not_theirs(self, pid: str) -> Dict[str, Any]:
-        """The OpenAlex records marked as not this person's (none for someone this run adds)."""
-        return self.nb.openalex_not_theirs(pid) if pid in self.contacts else {}
+        """The OpenAlex records marked as not this person's, with the records the library joined to one of them (none
+        for someone this run adds)."""
+        if pid not in self.contacts:
+            return {}
+        return {**dict.fromkeys(self.voided.get(pid, ()), {}), **self.nb.openalex_not_theirs(pid)}
 
     def existing_match(self, nm: str, insts: Set[str], pid: str,
-                       aid: str = "") -> Tuple[Optional[str], Optional[str]]:
-        """(contact, None) when exactly one same-name contact is confirmed by a tie to `pid` or a shared
-        institution; (None, contact) when a same-name contact exists without confirmation; (None, None) otherwise.
-        A contact who marked the coauthor's record `aid` as not theirs is never confirmed as that coauthor."""
+                       aid: str = "") -> Tuple[Optional[str], Optional[str], bool]:
+        """(contact, None, firm) when exactly one same-name contact is confirmed by a tie to `pid` or a shared
+        institution; (None, contact, False) when a same-name contact exists without confirmation; (None, None, False)
+        otherwise. `firm` says the first names agree in full, so the match holds wherever the run meets the coauthor;
+        a match by initial rests on the tie to `pid` alone. A contact who marked the coauthor's record `aid` as not
+        theirs is never confirmed as that coauthor."""
         keys = {family_key(nm)} | surname_tokens(nm)
         pool = {x for k in keys for x in self.by_family.get(k, [])}
         scores = {x: name_score(self.contacts[x]["name"], nm) for x in pool}
         cands = [x for x, sc in scores.items() if sc]
         if not cands:
-            return None, None
+            return None, None, False
         # A tie to `pid` confirms a match by initial; a shared institution alone needs the full first name.
         ok = [x for x in cands if (x in self.g.nbrs.get(pid, ()) or
               (scores[x] == 2 and any(_inst_match(self.contacts[x].get("institution", ""), i) for i in insts)))
               and aid not in self.not_theirs(x)]
         if len(ok) == 1 and not self.oa_of.get(ok[0]):
-            return ok[0], None
-        return None, (ok or cands)[0]
+            return ok[0], None, scores[ok[0]] == 2
+        return None, (ok or cands)[0], False
 
     def resolve(self, aid: str, nm: str, insts: Set[str], via: str, shared: int,
                 min_shared: int) -> Tuple[Optional[str], bool]:
@@ -269,36 +476,95 @@ class _Plan:
         target = self.by_oa.get(aid)
         if target is not None:
             return target, False
-        target, held = self.existing_match(nm, insts, via, aid)
+        if aid in self.orcid_held:
+            return None, True
+        target, held, firm = self.existing_match(nm, insts, via, aid)
         if target:
-            self.by_oa[aid] = target
+            if firm:                    # a match by initial holds only for `via`, whose tie confirmed it
+                self.by_oa[aid] = target
             return target, False
-        if held:
+        match = ("same name as", held) if held else self.import_match(nm)
+        if match:
             if shared >= min_shared and aid not in self.held_ids:
                 self.held_ids.add(aid)
-                self.held.append({"name": nm, "openalexId": aid, "via": self.name(via), "sameNameAs": held,
-                                  "shared": shared})
+                self.held.append({"name": nm, "openalexId": aid, "via": self.name(via), "sameNameAs": match[1],
+                                  "nameMatch": match[0], "shared": shared})
             return None, True
         return None, False
 
+    def import_match(self, nm: str) -> Optional[Tuple[str, str]]:
+        """(how, person) when the importer would hold back a new person with this name: the same name as someone in the
+        notebook or an earlier new person, or the same surname and a first name that begins the other's."""
+        key = name_key(nm)
+        if not key:
+            return None
+        same = self.by_key.get(key) or self.new_keys.get(key)
+        if same:
+            return "same name as", same
+        for other, pid in self.by_surname.get(key.split()[-1], []):
+            if _initials_match(key, other):
+                return "similar name to", pid
+        return None
+
     def add_person(self, aid: str, nm: str, via: str, shared: int, insts: Set[str], degree: int) -> str:
-        taken = {p["id"] for p in self.new_people.values()}
         base = slugify(nm)
         rid, n = base, 2
-        while self.nb.id_taken("contacts", rid) or rid in taken:
+        while self.nb.id_taken("contacts", rid) or rid in self.new_names:
             rid = f"{base}-{n}"
             n += 1
         self.new_people[aid] = {"id": rid, "name": nm, "via": via, "shared": shared, "insts": sorted(insts),
                                 "degree": degree}
+        self.new_names[rid] = nm
         self.by_oa[aid] = rid
+        if name_key(nm):
+            self.new_keys.setdefault(name_key(nm), rid)
         return rid
+
+    def hold_same_orcid(self, details: Dict[str, Dict[str, Any]], aids: List[str], owners: Dict[str, str]) -> Set[str]:
+        """Take out of the plan, with their coauthor records, the new people whose OpenAlex record carries an ORCID iD
+        in `owners` (iD -> person ID; each new person kept adds theirs), and list them. Returns the IDs taken out."""
+        gone = set()
+        for aid in aids:
+            plan = self.new_people.get(aid)
+            orcid = oc.clean((details.get(aid) or {}).get("orcid") or "").upper()
+            if plan is None or not orcid:
+                continue
+            if orcid not in owners:
+                owners[orcid] = plan["id"]
+                continue
+            gone.add(self._take_out(aid))
+            self.held.append({"name": plan["name"], "openalexId": aid, "via": self.name(plan["via"]),
+                              "sameOrcidAs": owners[orcid], "orcid": orcid, "shared": plan["shared"]})
+        self._drop_edges(gone)
+        return gone
+
+    def drop_unchecked(self, aids: List[str]) -> Set[str]:
+        """Take out of the plan, with their coauthor records, the new people whose OpenAlex author records could not be
+        read, so that their ORCID iD went unchecked; the next run adds them. Returns the IDs taken out."""
+        gone = {self._take_out(a) for a in aids if a in self.new_people}
+        self._drop_edges(gone)
+        return gone
+
+    def _take_out(self, aid: str) -> str:
+        """Remove a planned new person, who is then not added again in this run."""
+        plan = self.new_people.pop(aid)
+        self.by_oa.pop(aid, None)
+        if self.new_keys.get(name_key(plan["name"])) == plan["id"]:
+            del self.new_keys[name_key(plan["name"])]
+        self.orcid_held.add(aid)
+        return plan["id"]
+
+    def _drop_edges(self, gone: Set[str]) -> None:
+        if gone:
+            self.edges = [e for e in self.edges if e["from"] not in gone and e["to"] not in gone]
+            self.pairs = {p for p in self.pairs if p[0] not in gone and p[1] not in gone}
 
     def add_edge(self, a: str, b: str, n: int, w: Dict[str, Any], since: Optional[int]) -> bool:
         pair = tuple(sorted((a, b)))
         if pair in self.pairs or a == b:
             return False
         self.pairs.add(pair)
-        title = oa.work_title(w)[:400]
+        title = oa.work_title(w)[:290]          # with " (year)", within the 300 characters a source title may have
         year = w.get("publication_year") or ""
         base = f"coauthor-{a}-{b}-oa"[:96]
         eid, k = base, 2
@@ -318,9 +584,22 @@ class _Plan:
         return True
 
 
-def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person: int = 5, min_shared: int = 2,
-                only: Optional[List[str]] = None, log: Callable[[str], None] = print) -> Dict[str, Any]:
-    P = _Plan(svc, since_year)
+def _orcid_owners(P: _Plan) -> Dict[str, str]:
+    """ORCID iD -> the person in the notebook it belongs to (the first one listed, when several carry it)."""
+    owners: Dict[str, str] = {}
+    for pid in sorted(P.active):
+        for o in P.orcids(pid):
+            owners.setdefault(o, pid)
+    return owners
+
+
+def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person: Optional[int] = None,
+                min_shared: int = 2, only: Optional[List[str]] = None, log: Callable[[str], None] = print,
+                lib: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if lib is None:
+        from .library import load
+        lib = load(svc.ws)
+    P = _Plan(svc, since_year, lib)
     nb, contacts = P.nb, P.contacts
     dist, _ = svc.lab_dist(TieFilter())
     lab = [r for r in nb.root_ids if r in P.active]
@@ -328,6 +607,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     coverage: Dict[str, Dict[str, Any]] = {}
     identified: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
+    swept: Dict[str, List[Tuple[str, str]]] = defaultdict(list)     # person -> (coauthor, person) records added
 
     # 1. Lab members, accepted only on works already recorded for them.
     lab_works: Dict[str, List[Dict[str, Any]]] = {}
@@ -354,10 +634,19 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
                 for a, _ in accepted:
                     P.by_oa[a] = pid
                 hits = sum(h for _, h in accepted)
-                identified[pid] = {"ids": P.oa_of[pid], "basis": f"their OpenAlex works include {hits} "
-                                                                 f"paper{'s' if hits != 1 else ''} already recorded for them"}
+                identified[pid] = {"ids": P.oa_of[pid], "source": "expand",
+                                   "basis": f"their OpenAlex works include {hits} "
+                                            f"paper{'s' if hits != 1 else ''} already recorded for them"}
         if pid in P.oa_of:
-            lab_works[pid] = _works(client, P.oa_of[pid], max_authors=None)
+            try:
+                lab_works[pid], _ = _all_works(client, P.oa_of[pid], max_authors=None)
+            except BudgetReached:
+                raise
+            except HttpError as exc:
+                errors.append(f"{name}: {exc}")
+                coverage[pid] = {"status": "not-found", "degree": 0, "reason": str(exc)}
+                log(f"  {name}: OpenAlex could not be read ({exc})")
+                continue
             log(f"  {name}: {len(lab_works[pid])} OpenAlex works")
         else:
             coverage[pid] = {"status": "not-found", "degree": 0}
@@ -368,7 +657,6 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     new_first: List[str] = []
     for pid, works in lab_works.items():
         ranked, counts, latest, names, insts = _coauthor_counts(works, set(P.oa_of[pid]))
-        added = linked = 0
         for aid in ranked:
             if aid in lab_ids:
                 continue
@@ -378,20 +666,32 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
             if target is None:
                 target = P.add_person(aid, names[aid], pid, counts[aid], insts[aid], degree=1)
                 new_first.append(aid)
-                added += 1
-            if P.add_edge(pid, target, counts[aid], latest[aid], None) and P.new_people.get(aid, {}).get("via") != pid:
-                linked += 1
-        coverage[pid] = {"status": "collected", "degree": 0, "works": len(works), "coauthors": len(counts),
-                         "added": added, "linked": linked}
+            if P.add_edge(pid, target, counts[aid], latest[aid], None):
+                swept[pid].append((aid, target))
+        coverage[pid] = {"status": "collected", "degree": 0, "works": len(works), "coauthors": len(counts)}
+    # A new first-degree person whose OpenAlex record carries the ORCID iD of someone in the notebook, or of another
+    # new person, is held back before anyone is added through them.
+    owners = _orcid_owners(P)
+    details: Dict[str, Dict[str, Any]] = {}
+    unchecked, stop = _author_details(client, new_first, details, errors)
+    if stop:
+        raise stop
+    gone = P.drop_unchecked(unchecked) | P.hold_same_orcid(details, new_first, owners)
+    new_first = [a for a in new_first if a in P.new_people]
+    # People already in the notebook whom this run gives their first coauthor record with a lab member are first
+    # degree once it is applied, so their coauthors are collected in the same run.
+    first = sorted(set(first) | {t for recs in swept.values() for _, t in recs if t in P.active and dist.get(t, 2) > 1})
     if only:
         wanted = {norm_text(x) for x in only}
         first = [p for p in first if p in only or norm_text(contacts[p]["name"]) in wanted]
         new_first = [a for a in new_first if norm_text(P.new_people[a]["name"]) in wanted]
 
-    # 3. Identify first-degree people already in the notebook.
+    # 3. Identify first-degree people already in the notebook, on the same works that make someone first degree.
     lab_coauthors: Dict[str, List[Tuple[str, str, str, Set[str]]]] = defaultdict(list)
     for member, works in lab_works.items():
         for w in works:
+            if len(w.get("authorships") or []) > MAX_AUTHORS:
+                continue
             wids = set(_work_ids(w))
             for aid, nm, _ in _authorships(w):
                 if aid not in lab_ids:
@@ -401,7 +701,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
         c = contacts[pid]
         name = c["name"]
         if pid in P.oa_of:
-            identified[pid] = {"ids": P.oa_of[pid], "basis": "OpenAlex link on their record"}
+            identified[pid] = {"ids": P.oa_of[pid], "basis": P.oa_basis[pid], "source": P.oa_source[pid]}
             continue
         known = P.known_ids(pid)
         score: Counter = Counter()
@@ -462,35 +762,96 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
                 continue
         P.oa_of[pid] = [pick[0]]
         P.by_oa.setdefault(pick[0], pid)
-        identified[pid] = {"ids": [pick[0]], "basis": pick[1]}
+        identified[pid] = {"ids": [pick[0]], "basis": pick[1], "source": "expand"}
     log(f"  first degree: {len(new_first)} coauthors of lab members added; "
         f"{sum(1 for p in first if p in identified)} of {len(first)} existing first-degree people identified")
 
-    # 4. Second degree: the coauthors of every identified first-degree person. The first sweep decides who is
-    # added; the second links every first-degree person to each coauthor now in the notebook or the plan, so
-    # the order people are processed in does not matter.
+    # 4. Second degree: the coauthors of every identified first-degree person, on works that connect to what is known
+    # about them. The first sweep decides who is added; the second links every first-degree person to each coauthor
+    # now in the notebook or the plan, so the order people are processed in does not matter.
     since = f"{since_year}-01-01"
     targets = [(p, P.oa_of[p]) for p in first if p in identified] + \
               [(P.new_people[a]["id"], [a]) for a in new_first]
+    # Who is in the network before anyone is added to the second degree. Not the people expand or onboarding added to
+    # the second degree: they are known only from the kind of OpenAlex coauthorship this step checks, and counting them
+    # would let each run vouch for the papers the run before it left out.
+    first_set = set(first)
+    anchors = {aid: q for aid, q in P.by_oa.items()
+               if q in first_set or not SECOND_DEGREE_TAGS & set((contacts.get(q) or {}).get("tags") or [])}
+    roots = set(lab) | {P.new_people[a]["id"] for a in new_first}
+
+    def independent(q: str, pid: str) -> bool:
+        """Whether someone's place in the network rests on more than a tie to `pid`."""
+        return q in roots or bool(P.g.nbrs.get(q, set()) - {pid})
+
+    orcid_of: Dict[str, str] = {pid: (P.orcids(pid) or [""])[0] for pid, _ in targets if pid in contacts}
+    orcid_of.update({P.new_people[a]["id"]: oc.clean((details.get(a) or {}).get("orcid") or "").upper()
+                     for a in new_first})
     stopped = False
+    # People the library has not summarized may still carry an ORCID iD on their OpenAlex record.
+    missing = [a for pid, mine in targets if pid in contacts and not orcid_of.get(pid)
+               and not P.library_openalex(pid).get("summary") for a in mine]
+    try:
+        records = oa.get_authors(client, missing) if missing else {}
+        for pid, mine in targets:
+            if not orcid_of.get(pid):
+                orcid_of[pid] = next((oc.clean(records[a].get("orcid") or "").upper() for a in mine
+                                      if (records.get(a) or {}).get("orcid")), "")
+    except BudgetReached:
+        stopped = True
+    except HttpError as exc:
+        errors.append(f"OpenAlex author records: {exc}")
+    for pid, o in orcid_of.items():           # a new person with one of these iDs is another record of theirs
+        if o:
+            owners.setdefault(o, pid)
     collected: Dict[str, Tuple] = {}
     for pid, mine in targets:
         if stopped:
             coverage[pid] = {"status": "stopped", "degree": 1}
             continue
+        name = P.name(pid)
         try:
-            works = _works(client, mine, since=since)
+            works, truncated = _all_works(client, mine, since=since)
+            listed: List[Dict[str, Any]] = []
+            if orcid_of.get(pid):
+                try:
+                    listed = _orcid_listed(client, orcid_of[pid], works, since_year)
+                except BudgetReached:
+                    raise
+                except HttpError as exc:
+                    errors.append(f"{name}: papers listed on ORCID: {exc}")
         except BudgetReached:
             stopped = True
             coverage[pid] = {"status": "stopped", "degree": 1}
             continue
         except HttpError as exc:
-            errors.append(f"{P.name(pid)}: {exc}")
+            errors.append(f"{name}: {exc}")
             coverage[pid] = {"status": "not-found", "degree": 1, "reason": str(exc)}
             continue
-        ranked, counts, latest, names, insts = _coauthor_counts(works, set(mine))
-        collected[pid] = (works, ranked, counts, latest, names, insts)
-        added = cap = 0     # cap: this person's frequent coauthors added by any expansion, now or before
+        # A paper listed on ORCID counts when OpenAlex names the person on it; their authorship there is theirs.
+        selves = [_selves(w, name, orcid_of[pid]) for w in listed]
+        listed = [w for w, s in zip(listed, selves) if s]
+        mine_all = set(mine).union(*selves)
+        known = P.lab_paper_ids(pid) if pid in contacts else set()
+        places = [x.strip() for x in (contacts[pid].get("institution") or "").split(";") if x.strip()] \
+            if pid in contacts else []
+
+        def anchored(w: Dict[str, Any]) -> bool:
+            for a in w.get("authorships") or []:
+                aid = oa.short_id((a.get("author") or {}).get("id") or "")
+                if aid in mine_all:
+                    if any(_inst_match(p, i.get("display_name", "")) for p in places for i in a.get("institutions") or []):
+                        return True
+                elif aid and anchors.get(aid) not in (None, pid) and independent(anchors[aid], pid):
+                    return True
+            return bool(known) and bool(known & set(_work_ids(w)))
+        kept, left_out = _anchored(works + listed, mine_all, anchored)
+        if left_out and not kept:
+            coverage[pid] = {"status": "unanchored", "degree": 1, "works": 0, "unanchored": left_out}
+            continue
+        ranked, counts, latest, names, insts = _coauthor_counts(kept, mine_all)
+        collected[pid] = (ranked, counts, latest, names, insts)
+        cap = 0     # this person's coauthors added by any expansion, now or before (with a cap only)
         for aid in ranked:
             if counts[aid] < min_shared:
                 break
@@ -498,24 +859,44 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
             if held:
                 continue
             if target is not None:
-                if P.added_by_expansion(target) or P.new_people.get(aid, {}).get("degree") == 2:
+                if per_person is not None and (P.added_by_expansion(target) or
+                                               P.new_people.get(aid, {}).get("degree") == 2):
                     cap += 1
-            elif cap < per_person:
+            elif per_person is None or cap < per_person:
                 P.add_person(aid, names[aid], pid, counts[aid], insts[aid], degree=2)
-                added += 1
                 cap += 1
-        coverage[pid] = {"status": "collected", "degree": 1, "works": len(works), "coauthors": len(counts),
-                         "added": added, "linked": 0}
-    for pid, (works, ranked, counts, latest, names, insts) in collected.items():
-        linked = 0
+        coverage[pid] = {"status": "collected", "degree": 1, "works": len(kept), "coauthors": len(counts)}
+        listed_ids = {w.get("id") for w in listed}
+        listed_kept = sum(1 for w in kept if w.get("id") in listed_ids)
+        coverage[pid].update({k: v for k, v in (("unanchored", left_out), ("orcidWorks", listed_kept),
+                                                 ("truncated", truncated)) if v})
+    for pid, (ranked, counts, latest, names, insts) in collected.items():
         for aid in ranked:
             target, held = P.resolve(aid, names[aid], insts[aid], pid, counts[aid], min_shared)
             if target is None or held:
                 continue
-            if P.add_edge(pid, target, counts[aid], latest[aid], since_year) and \
-                    P.new_people.get(aid, {}).get("via") != pid:
-                linked += 1
-        coverage[pid]["linked"] = linked
+            if P.add_edge(pid, target, counts[aid], latest[aid], since_year):
+                swept[pid].append((aid, target))
+    log(f"  second degree: {sum(1 for p in P.new_people.values() if p['degree'] == 2)} people added, "
+        f"{len(P.edges)} coauthor records in all")
+
+    # 5. Details for new people: OpenAlex author records, then ORCID for degrees and current positions. A new person
+    # whose record carries an ORCID iD already taken is held back, as in step 2.
+    second = [a for a, p in P.new_people.items() if p["degree"] == 2]
+    unchecked, stop = _author_details(client, second, details, errors)
+    if stop:                        # whose coauthors it could not finish: the next run does
+        stopped = True
+        for via in {P.new_people[a]["via"] for a in unchecked if a in P.new_people}:
+            if (coverage.get(via) or {}).get("status") == "collected":
+                coverage[via]["status"] = "stopped"
+    gone |= P.drop_unchecked(unchecked)
+    gone |= P.hold_same_orcid(details, [a for a in second if a in P.new_people], owners)
+    added_by = Counter(p["via"] for p in P.new_people.values())
+    for pid, info in coverage.items():
+        if info["status"] == "collected":
+            info["added"] = added_by[pid]
+            info["linked"] = sum(1 for aid, t in swept.get(pid, []) if t not in gone and
+                                 P.new_people.get(aid, {}).get("via") != pid)
     for pid, info in identified.items():
         if pid in coverage:
             coverage[pid].update({"openalexIds": info["ids"], "basis": info["basis"]})
@@ -524,21 +905,17 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
         if rid in coverage:
             coverage[rid].update({"openalexIds": [aid],
                                   "basis": f"coauthor of {P.name(P.new_people[aid]['via'])} in OpenAlex"})
-    log(f"  second degree: {sum(1 for p in P.new_people.values() if p['degree'] == 2)} people added, "
-        f"{len(P.edges)} coauthor records in all")
-
-    # 5. Details for new people: OpenAlex author records, then ORCID for degrees and current positions.
-    details: Dict[str, Dict[str, Any]] = {}
-    if P.new_people:
-        try:
-            details = oa.get_authors(client, list(P.new_people))
-        except HttpError as exc:
-            errors.append(f"author details: {exc}")
-    log("  reading ORCID records for new people with an ORCID iD")
+    log(f"  reading ORCID records for {sum(1 for a in P.new_people if (details.get(a) or {}).get('orcid'))} new "
+        "people with an ORCID iD")
     new_contacts = [_contact_record(client, aid, plan, details.get(aid) or {}, P.name(plan["via"]), since_year, errors)
                     for aid, plan in P.new_people.items()]
     updates = []
     for pid, info in identified.items():
+        # Links already on their record, or the library's match, stay where they are. A match whose works were not
+        # read, or did not connect to what is known about them, is not written to their record.
+        if info["source"] != "expand" or (coverage.get(pid) or {}).get("status") != "collected" \
+                or not coverage[pid].get("works"):
+            continue
         no = nb.openalex_not_theirs(pid)      # a link marked as not theirs does not count
         if any(a not in no for s in contacts[pid].get("sources") or [] for a in oa.find_author_ids(s.get("url", ""))):
             continue
@@ -548,7 +925,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
         "notebook": {"schemaVersion": 1, "contacts": updates + new_contacts, "edges": P.edges, "meetings": []},
         "coverage": coverage,
         "report": {"held": P.held, "errors": errors, "requests": client.requests, "costUsd": round(client.cost_usd, 4),
-                   "newFirstDegree": len(new_first),
+                   "newFirstDegree": sum(1 for p in P.new_people.values() if p["degree"] == 1),
                    "newSecondDegree": sum(1 for p in P.new_people.values() if p["degree"] == 2),
                    "linksAdded": len(updates)},
         "standard": {"sinceYear": since_year, "perPerson": per_person, "minShared": min_shared,
@@ -564,7 +941,7 @@ def _contact_record(client: Client, aid: str, plan: Dict[str, Any], a: Dict[str,
     institution = "; ".join(last[:2]) or "; ".join(plan["insts"][:2])
     orcid = (a.get("orcid") or "").replace("https://orcid.org/", "")
     why = ("a coauthor of " + via_name if plan["degree"] == 1 else
-           f"a frequent coauthor of {via_name} ({plan['shared']} shared works since {since_year})")
+           f"a coauthor of {via_name} on {plan['shared']} works since {since_year}")
     rec: Dict[str, Any] = {
         "id": plan["id"], "name": plan["name"][:160], "institution": institution[:200], "role": "", "lab": "",
         "email": "", "website": "", "notes": "", "createdAt": utc_now(),
@@ -582,7 +959,10 @@ def _contact_record(client: Client, aid: str, plan: Dict[str, Any], a: Dict[str,
         try:
             edus, emps = oc.activities(client, orcid)
         except HttpError as exc:
-            errors.append(f"ORCID {orcid}: {exc}")
+            errors.append(f"{plan['name']}: ORCID record {orcid} could not be read ({exc}), so they were added "
+                          "without the doctorate and position it lists")
+            rec["sources"].append({"url": oc.record_url(orcid), "note": (
+                f"ORCID iD on their OpenAlex record. ORCID did not return the record when expand asked on {today()}.")})
             return rec
         rec["sources"].append({"url": oc.record_url(orcid), "note": f"ORCID record, read by expand on {today()}."})
         d = oc.doctorate(edus, orcid, today())
@@ -617,17 +997,21 @@ def coverage_note(plan: Dict[str, Any], batch_id: str) -> Dict[str, Any]:
             "standard": plan["standard"], "batchId": batch_id, "people": plan["coverage"]}
 
 
-def expand(ws_path: str, since_year: int = 2016, per_person: int = 5, min_shared: int = 2,
-           only: Optional[List[str]] = None, dry_run: bool = False, budget_usd: float = 0.08,
+def expand(ws_path: str, since_year: int = 2016, per_person: Optional[int] = None, min_shared: int = 2,
+           only: Optional[List[str]] = None, dry_run: bool = False, budget_usd: Optional[float] = None,
            client: Optional[Client] = None, log: Callable[[str], None] = print) -> Dict[str, Any]:
+    """`budget_usd` defaults to the library's: $0.90 of the $1 a day an OpenAlex key allows, else $0.08 of the free
+    $0.10."""
+    from .library import default_budget, load
     ws = Workspace(ws_path)
     svc = Service(ws)
-    client = client or Client(cache_dir=default_cache(ws), budget_usd=budget_usd,
+    client = client or Client(cache_dir=default_cache(ws),
+                              budget_usd=default_budget() if budget_usd is None else budget_usd,
                               mailto=(ws.config.get("settings") or {}).get("contactEmail", ""))
     log("Reading OpenAlex" + (" (dry run: nothing is saved)" if dry_run else ""))
     try:
         plan = plan_expand(svc, client, since_year=since_year, per_person=per_person, min_shared=min_shared,
-                           only=only, log=log)
+                           only=only, log=log, lib=load(ws))
     except BudgetReached as exc:
         raise SystemExit(f"Stopped before finishing: {exc}. Responses so far are cached; run again tomorrow.")
     nbk, rep = plan["notebook"], plan["report"]
@@ -637,7 +1021,9 @@ def expand(ws_path: str, since_year: int = 2016, per_person: int = 5, min_shared
     log(f"Plan: {rep['newFirstDegree']} new first-degree and {rep['newSecondDegree']} new second-degree people, "
         f"{len(nbk['edges'])} new coauthor records, {rep['linksAdded']} OpenAlex links on existing records, "
         f"{len(rep['held'])} held back as possible duplicates. {client.requests} requests, "
-        f"${client.cost_usd:.4f} of OpenAlex's free daily allowance.")
+        f"${client.cost_usd:.4f} of OpenAlex's daily allowance.")
+    if plan["stopped"]:
+        log("The run reached its spending limit before it finished; run expand again tomorrow to add the rest.")
     if dry_run:
         return {"dryRun": True, "plan": plan}
     data = json.dumps(nbk, ensure_ascii=False).encode("utf-8")
@@ -650,15 +1036,17 @@ def expand(ws_path: str, since_year: int = 2016, per_person: int = 5, min_shared
     else:
         ws.acquire_lock(0)
         try:
+            svc = Service(ws)               # the workspace as it is now: the plan may have taken hours
             imp = Importer(svc)
-            prev = imp.preview(filename, data)
+            prev = imp.preview(filename, data, size_limit=False)
             result = imp.apply(prev["batchId"], {k: "skip" for k in prev["needsDecision"]}, actor)
-            result["heldForReview"] = _held(prev)
+            result["heldForReview"], result["heldMatches"] = _held(prev), _held_matches(prev)
             note = svc.add_workspace_note(coverage_note(plan, result["batchId"]), actor)
         finally:
             ws.release_lock()
     path = _write_digest(ws, svc, plan, result)
-    log(f"Applied as import batch {result['batchId']}: {result['applied']}. Digest: {path}")
+    counts = {k: v for k, v in result["applied"].items() if k != "rejectedAtApply"}   # listed in the digest's .json
+    log(f"Applied as import batch {result['batchId']}: {counts}. Digest: {path}")
     log(f"To undo: python3 labnetwork.py undo-import <workspace> {result['batchId']}")
     return {"dryRun": False, "plan": plan, "result": result, "note": note, "digestPath": path}
 
@@ -674,11 +1062,32 @@ def _post(port: int, path: str, body: Dict[str, Any], actor: str) -> Dict[str, A
 
 
 def _http(port: int, filename: str, data: bytes, actor: str) -> Dict[str, Any]:
-    prev = _post(port, "/api/import/preview", {"filename": filename, "content": data.decode("utf-8")}, actor)
+    from .importer import MAX_BYTES
+    from .server import MAX_BODY
+    upload = {"filename": filename, "content": data.decode("utf-8")}
+    if len(data) > MAX_BYTES or len(json.dumps(upload).encode("utf-8")) > MAX_BODY:
+        raise SystemExit(f"The plan is {len(data) / 1e6:.0f} MB, more than the running app accepts in one import. "
+                         "Stop the app and run expand again: without the app, expand applies the plan itself. "
+                         "Responses are cached, so the second run is quicker.")
+    prev = _post(port, "/api/import/preview", upload, actor)
     result = _post(port, "/api/import/apply", {"batchId": prev["batchId"],
                                                "decisions": {k: "skip" for k in prev["needsDecision"]}}, actor)
-    result["heldForReview"] = _held(prev)
+    result["heldForReview"], result["heldMatches"] = _held(prev), _held_matches(prev)
     return result
+
+
+def _held_matches(prev: Dict[str, Any]) -> List[str]:
+    """For each person the import held back, in `_held`'s order: who they may duplicate."""
+    out = []
+    for it in prev["items"]:
+        if it["key"] not in prev["needsDecision"]:
+            continue
+        m = (it.get("matches") or [{}])[0]
+        reasons = m.get("reasons") or []
+        out.append("same name as another person in this run" if any(r.startswith("same name as row") for r in reasons)
+                   else f"similar name to {m['name']}" if reasons == ["similar name"]
+                   else f"same name as {m['name']}" if m.get("name") else "")
+    return out
 
 
 def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dict[str, Any]) -> str:
@@ -686,30 +1095,58 @@ def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dic
     os.makedirs(ddir, exist_ok=True)
     names = {pid: c["name"] for pid, c in svc.nb.records["contacts"].items()}
     names.update({c["id"]: c["name"] for c in plan["notebook"]["contacts"] if c.get("name")})
-    st, rep = plan["standard"], plan["report"]
+    st, rep, ap = plan["standard"], plan["report"], result["applied"]
+    rule = (f"everyone else with {st['minShared']} or more shared works was added" if st.get("perPerson") is None else
+            f"up to {st['perPerson']} others with {st['minShared']} or more shared works were added per person")
+    works = lambda n: f"{n} {'work' if n == 1 else 'works'}"
     lines = [f"# Network expansion, {today()}", "",
              f"First degree: every OpenAlex coauthor of a lab member (papers with {st['maxAuthors']} or fewer authors). "
              f"Second degree: for each first-degree person found in OpenAlex, coauthors on works since "
-             f"{st['sinceYear']}. Coauthors already in the notebook gained a coauthor record where they lacked one; up "
-             f"to {st['perPerson']} others with {st['minShared']} or more shared works were added per person.", "",
-             f"Import batch {result['batchId']}: {result['applied']}. {rep['newFirstDegree']} new first-degree and "
-             f"{rep['newSecondDegree']} new second-degree people; {len(plan['notebook']['edges'])} coauthor records. "
-             f"{rep['requests']} requests; ${rep['costUsd']:.4f} of OpenAlex's free daily allowance.", ""]
+             f"{st['sinceYear']}, from every OpenAlex record linked to them and the papers they list on ORCID. A work "
+             f"counted when it names someone already in the network, was recorded with a lab member, or lists the "
+             f"person at their recorded institution or at an institution where two such works list them. Coauthors "
+             f"already in the notebook gained a coauthor record where they lacked one; {rule}.", "",
+             f"Plan: {rep['newFirstDegree']} new first-degree and {rep['newSecondDegree']} new second-degree people, "
+             f"{len(plan['notebook']['edges'])} coauthor records; {len(rep['held'])} people held back as possible "
+             f"duplicates (listed below). Import batch {result['batchId']}: {ap.get('created', 0)} records created and "
+             f"{ap.get('updated', 0)} updated." + (
+                 f" The import held back {ap.get('skipped', 0)} more {'person' if ap.get('skipped') == 1 else 'people'} "
+                 f"and refused {ap.get('rejected', 0)} {'record' if ap.get('rejected') == 1 else 'records'}; the .json "
+                 f"file beside this one gives each reason." if ap.get("skipped") or ap.get("rejected")
+                 else "") +
+             f" {rep['requests']} requests; ${rep['costUsd']:.4f} of OpenAlex's daily allowance.", ""]
     by_status: Dict[str, List[str]] = defaultdict(list)
     for pid, v in sorted(plan["coverage"].items(), key=lambda kv: names.get(kv[0], kv[0])):
-        extra = (f": {v['added']} added, {v['linked']} linked, {v['coauthors']} coauthors in {v['works']} works"
-                 if v["status"] == "collected" else "")
+        extra = ""
+        if v["status"] == "collected":
+            extra = f": {v['added']} added, {v['linked']} linked, {v['coauthors']} coauthors in {works(v['works'])}"
+            if v.get("unanchored"):
+                extra += f"; {works(v['unanchored'])} left out as unconnected"
+        elif v["status"] == "unanchored":
+            extra = f": {works(v['unanchored'])}"
         by_status[v["status"]].append(f"- {names.get(pid, pid)}{' (lab member)' if v.get('degree') == 0 else ''}{extra}")
-    for s in ("collected", "ambiguous", "not-found", "not-looked-up", "stopped"):
+    for s in ("collected", "unanchored", "ambiguous", "not-found", "not-looked-up", "stopped"):
         if by_status.get(s):
             lines += [f"## {STATUS_TEXT[s][0].upper() + STATUS_TEXT[s][1:]} ({len(by_status[s])})"] + by_status[s] + [""]
-    held = rep["held"] + [{"name": x} for x in result.get("heldForReview", [])]
+    by_import = result.get("heldForReview", [])
+    held = rep["held"] + [{"name": x, "match": m} for x, m in
+                          zip(by_import, result.get("heldMatches") or [""] * len(by_import))]
     if held:
         lines += [f"## Held back as possible duplicates ({len(held)})",
-                  "Each has the same name as someone already in the notebook, with nothing to confirm it is the same "
+                  "Each has the same or a similar name as someone already in the notebook or another new person, or "
+                  "an OpenAlex record with the same ORCID iD as one of them. Nothing confirms it is a different "
                   "person, so it was not added.", ""]
-        lines += [f"- {x['name']}" + (f" (via {x['via']}; same name as {names.get(x['sameNameAs'], x['sameNameAs'])})"
-                                      if x.get("via") else "") for x in held] + [""]
+        for x in held:
+            why = ""
+            if x.get("sameOrcidAs"):
+                why = f" (via {x['via']}; same ORCID iD as {names.get(x['sameOrcidAs'], x['sameOrcidAs'])})"
+            elif x.get("via"):
+                why = (f" (via {x['via']}; {x.get('nameMatch') or 'same name as'} "
+                       f"{names.get(x['sameNameAs'], x['sameNameAs'])})")
+            elif x.get("match"):
+                why = f" ({x['match']})"
+            lines.append(f"- {x['name']}{why}")
+        lines.append("")
     if rep["errors"]:
         lines += ["## Problems"] + [f"- {e}" for e in rep["errors"]] + [""]
     path = os.path.join(ddir, f"expand-{today()}-{result['batchId'].split('-')[1][9:15]}.md")   # one per batch

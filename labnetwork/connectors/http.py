@@ -6,8 +6,10 @@ offline and audited later. Tests pass their own `transport` instead of the netwo
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -161,7 +163,8 @@ class Client:
                     delay *= 2
                     continue
                 raise HttpError(url, exc.code, exc.reason if isinstance(exc.reason, str) else str(exc.reason))
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError,
+                    http.client.IncompleteRead) as exc:       # Python 3.9's socket.timeout is not a TimeoutError
                 if attempt < 4:
                     time.sleep(delay)
                     delay *= 2

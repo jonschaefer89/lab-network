@@ -5,7 +5,9 @@ refreshed without touching any curated record. A paper or award in it is linked 
 of it is a relationship between people.
 
 Who is looked up: everyone within the workspace's degree limit (two by default) who is a lab member, has a confirmed
-doctorate, has a research relationship, or already has an OpenAlex link.
+doctorate, has a research relationship, or already has an OpenAlex link. The people `expand` adds to the second degree
+can number in the thousands, so the library looks up one of them only once their doctorate is confirmed and their
+institution and position are known; people the library already holds stay.
 
 How people are identified:
   OpenAlex  the links on their record or found by `expand`; else the author on a recent paper of someone already linked
@@ -325,12 +327,23 @@ def _person_institutions(contact: Dict[str, Any], rec: Dict[str, Any]) -> List[s
     return names
 
 
-def _people_in_scope(svc: Service) -> List[str]:
-    """Lab members and researchers within the degree limit, nearest first."""
+def waits_for_doctorate_and_position(nb, pid: str, degree: Optional[int], held: Iterable[str]) -> bool:
+    """Whether the library leaves someone out for now: `expand` added them to the second degree, the library does not
+    hold them yet, and their doctorate is not confirmed or their institution and position are not known. The first run
+    after they gain those looks them up."""
+    c = nb.records["contacts"][pid]
+    return (degree is not None and degree >= 2 and "expand-second-degree" in (c.get("tags") or [])
+            and pid not in held and not (nb.doctorate_state(c) == "confirmed" and nb.placement(c)["identified"]))
+
+
+def _people_in_scope(svc: Service, lib: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Lab members and researchers within the degree limit, nearest first, without the people `expand` added who wait
+    for a confirmed doctorate and a known position (see waits_for_doctorate_and_position)."""
     nb = svc.nb
     dist, _ = svc.lab_dist(TieFilter())
     limit = svc.degree_limit() or 2
     g = svc.graph(TieFilter())
+    held = (lib or {}).get("people") or {}
     out = []
     for pid, c in nb.active("contacts"):
         d = dist.get(pid)
@@ -338,7 +351,7 @@ def _people_in_scope(svc: Service) -> List[str]:
             continue
         types = {e["type"] for o in g.nbrs.get(pid, ()) for e in g.records_between(pid, o)}
         if (nb.is_lab(pid) or nb.doctorate_state(c) == "confirmed" or types & RESEARCH_TYPES
-                or openalex_links(nb, pid)):
+                or openalex_links(nb, pid)) and not waits_for_doctorate_and_position(nb, pid, d, held):
             out.append(pid)
     out.sort(key=lambda p: (dist.get(p, 9), nb.records["contacts"][p]["name"]))
     return out
@@ -1183,7 +1196,7 @@ def run(ws_path: str, update: bool = False, budget_usd: Optional[float] = None, 
         client = client or Client(cache_dir=default_cache(ws),
                                   budget_usd=default_budget() if budget_usd is None else budget_usd,
                                   mailto=(ws.config.get("settings") or {}).get("contactEmail", ""))
-        people = _people_in_scope(svc)
+        people = _people_in_scope(svc, lib)
         log(f"Library {'update' if update else 'build'} for {len(people)} people within "
             f"{svc.degree_limit() or 2} degrees of the lab")
         r = _Run(svc, lib, client, update, log)

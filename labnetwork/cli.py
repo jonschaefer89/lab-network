@@ -85,13 +85,24 @@ def cmd_export(args):
 
 
 def cmd_import(args):
+    ws = Workspace(args.workspace)
+    if not args.yes:
+        return _import(ws, args)
+    ws.acquire_lock(0)          # one writer at a time: refused while the app is running
+    try:
+        return _import(ws, args)
+    finally:
+        ws.release_lock()
+
+
+def _import(ws, args):
     from .importer import Importer
     from .service import Service
-    svc = Service(Workspace(args.workspace))
+    svc = Service(ws)
     imp = Importer(svc)
     with open(args.file, "rb") as f:
         data = f.read()
-    prev = imp.preview(os.path.basename(args.file), data)
+    prev = imp.preview(os.path.basename(args.file), data, size_limit=False)
     print(prev["explain"])
     if prev["alreadyImported"]:
         print("This exact file was imported before: " + ", ".join(b["batchId"] for b in prev["alreadyImported"]))
@@ -650,14 +661,17 @@ def main(argv=None):
     s.add_argument("--dry-run", action="store_true", help="show what would change without saving")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(fn=cmd_refresh)
-    s = sub.add_parser("expand", help="add the most frequent recent coauthors of each first-degree person")
+    s = sub.add_parser("expand", help="add every coauthor of the lab members, and each first-degree person's "
+                       "coauthors on two or more works since the start year")
     s.add_argument("workspace")
     s.add_argument("--since", type=int, default=2016, help="count works from this year (default 2016)")
-    s.add_argument("--per-person", type=int, default=5, help="new people added per first-degree person (default 5)")
+    s.add_argument("--per-person", type=int, default=None,
+                   help="at most this many new people per first-degree person (default: no limit)")
     s.add_argument("--min-shared", type=int, default=2, help="shared works a new person needs (default 2)")
     s.add_argument("--only", help="comma-separated IDs or names of first-degree people to expand")
-    s.add_argument("--budget", type=float, default=0.08,
-                   help="stop before OpenAlex spending passes this many US dollars (default 0.08, within the free daily allowance)")
+    s.add_argument("--budget", type=float, default=None,
+                   help="stop before OpenAlex spending passes this many US dollars (default 0.90 with an OpenAlex key, "
+                        "else 0.08: within the daily allowance)")
     s.add_argument("--dry-run", action="store_true", help="show what would change without saving")
     s.set_defaults(fn=cmd_expand)
     s = sub.add_parser("library", help="build or update the research library: OpenAlex records and recent papers, "

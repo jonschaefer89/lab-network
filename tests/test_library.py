@@ -321,6 +321,39 @@ class LibraryTests(unittest.TestCase):
         self.assertGreater(res["coverage"]["openalexUnmatched"], 0)
         self.assertTrue(all(library.load(Workspace(self.ws_path))["people"].values()))   # no empty records
 
+    def test_people_expand_added_wait_for_a_doctorate_and_position(self):
+        svc = Service(Workspace(self.ws_path))
+        doctorate = {"doctorateStatus": "confirmed", "doctorateType": "PhD", "doctorateEvidence": "ORCID education record",
+                     "doctorateSourceUrl": "https://orcid.org/0000-0000-0000-0001", "doctorateCheckedAt": TODAY}
+
+        def added(name, **fields):          # added to the second degree by expand, through Chris
+            pid = svc.create_contact({"fields": {"name": name, "tags": ["openalex-expand", "expand-second-degree"],
+                                                 **fields}}, "test")["id"]
+            svc.create_tie({"fields": {"from": "c1", "to": pid, "type": "coauthor",
+                                       "evidence": "Named together on 2 works"}}, "test")
+            return pid
+        shown = added("Sky Shown", institution=LU, role="Professor", **doctorate)
+        no_position = added("Ren Unplaced", institution=LU, **doctorate)
+        no_doctorate = added("Lou Unconfirmed", institution=LU, role="Professor")
+        kept = added("Kim Kept", institution=LU, role="Professor")
+        lib = library.empty()
+        lib["people"][kept] = {"openalex": {"status": "unmatched"}}      # already in the library
+        svc = Service(Workspace(self.ws_path))
+        people = library._people_in_scope(svc, lib)
+        self.assertIn(shown, people)
+        self.assertIn(kept, people)
+        self.assertNotIn(no_position, people)
+        self.assertNotIn(no_doctorate, people)
+        self.assertIn("c1", people)                                      # everyone else as before
+        library.save(Workspace(self.ws_path), lib)
+        svc = Service(Workspace(self.ws_path))
+        flags = {"maxDegree": "all", "doctorate": "any", "identified": "0"}
+        self.assertTrue(svc.person(no_doctorate, flags)["librarySkipped"])     # the profile says why it has no papers
+        self.assertFalse(svc.person(shown, flags)["librarySkipped"])
+        self.assertFalse(svc.person(kept, flags)["librarySkipped"])
+        # The degree is the library's, whatever relationships the view shows.
+        self.assertTrue(svc.person(no_doctorate, dict(flags, types="mentor"))["librarySkipped"])
+
     def test_nih_profile_id_on_the_record_outranks_a_name_match(self):
         nb = notebook()
         for c in nb["contacts"]:

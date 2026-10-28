@@ -54,7 +54,8 @@ The build caps the network at 1,500 people by default so the map stays readable.
 ## What the research library reads
 
 The library covers lab members and the researchers in the network: people with a confirmed doctorate, a coauthor,
-shared-grant or collaborator record, or an OpenAlex link.
+shared-grant or collaborator record, or an OpenAlex link. Of the people `expand` adds to the second degree, it covers
+only those with a confirmed doctorate and a known institution and position, because there can be thousands of them. People the library already holds stay in it.
 
 - **OpenAlex.** Each person's author record (works, citations, h-index, main topics) and up to 50 of their most recent
   works since the start year with 30 or fewer authors. A person is identified by the OpenAlex links on their record; by

@@ -23,6 +23,7 @@ from .packet import Packet, PacketError, load_packet, sha256_file
 CONFIG_NAME = "workspace.json"
 LOG_NAME = "changes.jsonl"
 LOCK_NAME = ".labnetwork.lock"
+CHECKS_NAME = "packet-checks.json"   # in a shared copy: the packet checks its build ran (site.py)
 
 
 def utc_now() -> str:

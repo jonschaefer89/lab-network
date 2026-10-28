@@ -22,10 +22,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import describe
 from .graph import (ALL_TYPES, GROUP_PRIORITY, MODES, TYPE_GROUP_OF, TYPE_ORDER, Graph, TieFilter)
 from .model import BASE_VERSION, COLLECTIONS, KIND_TO_COLL, Notebook, name_key, norm_text
-from .packet import (check_contact, check_edge, check_meeting, entity_schema, is_http_url,
+from .packet import (bundled_schema, check_contact, check_edge, check_meeting, entity_schema, is_http_url,
                      validate_rules, validate_schema, validation_report)
 from .search import load_aliases, search_all as run_search
-from .store import Workspace, today, utc_now
+from .store import CHECKS_NAME, Workspace, today, utc_now
 
 APP_VERSION = "0.1.0"
 
@@ -150,7 +150,7 @@ class Service:
     def __init__(self, workspace: Workspace):
         self.ws = workspace
         self.packet = workspace.load_packet()
-        self.report = validation_report(self.packet)
+        self.report = self._checked_by_build() or validation_report(self.packet)
         self.lock = threading.RLock()
         self.nb = Notebook(self.packet, workspace.read_events(), self.packet.root_ids)
         self.aliases = load_aliases(workspace.path)
@@ -162,6 +162,20 @@ class Service:
         self._conferences: Optional[Tuple[Any, List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]] = None
 
     # ------------------------------------------------------------------ helpers
+
+    def _checked_by_build(self) -> Optional[Dict[str, Any]]:
+        """A shared copy's packet checks, as its build ran them on this same notebook.json, so that a browser opening
+        the copy need not run them again (for a large network they take most of the time it takes to open)."""
+        if not (self.ws.config.get("settings") or {}).get("sharedCopy"):
+            return None
+        try:
+            with open(os.path.join(self.ws.path, CHECKS_NAME), encoding="utf-8") as f:
+                report = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(report, dict) or report.get("sha256") != self.packet.sha256:
+            return None
+        return dict(report, packetPath=self.packet.path)
 
     def conferences(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Imported conference programs matched to the notebook (see conferences.py), and one search item per
@@ -583,6 +597,7 @@ class Service:
                 "historicalCoverage": {k: c.get(k) for k in ("seed", "networkDegree", "expansionStatus")},
                 "collection": self._collection_view(pid),
                 "library": self._library_view(pid),
+                "librarySkipped": self._library_skipped(pid),
                 "openalexNotTheirs": self._not_theirs_view(pid),
                 "conferences": self._person_conferences(pid),
                 "filters": {**pf.describe(), "ties": tf.describe()},
@@ -856,7 +871,7 @@ class Service:
     def validation(self) -> Dict[str, Any]:
         with self.lock:
             current = self.nb.to_notebook()
-            schema_errors = validate_schema(current, self.packet.schema)
+            schema_errors = validate_schema(current, bundled_schema())
             rule_issues = validate_rules(current)
             return {"packet": self.report,
                     "current": {"schemaErrors": schema_errors[:100],
@@ -1227,6 +1242,15 @@ class Service:
                 "nsf": {k: (rec.get("nsf") or {}).get(k) for k in ("status", "checkedAt", "reason")},
                 "standard": lib.get("standard"), "updatedAt": lib.get("updatedAt", "")}
 
+    def _library_skipped(self, pid: str) -> bool:
+        """Whether the research library leaves this person out until their doctorate is confirmed and their institution
+        and position are known. Their degree is the one the library uses, whatever the view's relationship filter."""
+        lib = self.library()
+        if lib is None:
+            return False
+        from .library import waits_for_doctorate_and_position
+        return waits_for_doctorate_and_position(self.nb, pid, self.lab_dist()[0].get(pid), lib.get("people") or {})
+
     def latest(self, pid: str) -> Dict[str, Any]:
         """New papers and NIH awards for one person since their last library update, checked live (cached 6 hours).
 
@@ -1399,7 +1423,8 @@ class Service:
             return None
         from .expand import STATUS_TEXT
         out = {k: info.get(k) for k in ("status", "degree", "date", "method", "standard", "openalexIds", "basis",
-                                         "added", "linked", "works", "coauthors", "reason", "batchId")}
+                                         "added", "linked", "works", "coauthors", "unanchored", "orcidWorks",
+                                         "truncated", "reason", "batchId")}
         out["text"] = STATUS_TEXT.get(info.get("status"), info.get("status", ""))
         return out
 

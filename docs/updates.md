@@ -66,7 +66,8 @@ The mark goes in the change log under the name of whoever made it, so it outlast
   without it.
 - **The live check** on their profile page does not read it.
 - **Refresh and expand** do not read it for them, and do not match a coauthor with that record to them by name; expand
-  lists such a coauthor as held back.
+  lists such a coauthor as held back. Expand also stops reading the records the research library joined to the marked
+  one by ORCID iD, until the library's next run makes a new match.
 
 **Undo** beside a mark withdraws it, and the next library run may link the record again.
 
@@ -78,7 +79,8 @@ added first, because once their sources link one, the library uses only those li
 
 A refresh looks up recent public records for people near the lab and adds what is new. To fill in a network the
 first time, or after adding people by hand, use `expand` instead (see the README): it collects every first-degree
-person's frequent coauthors, while a refresh adds only papers and coauthors that appeared since the last run.
+person's coauthors on two or more papers since the start year, while a refresh adds only papers and coauthors that
+appeared since the last run.
 
 ```bash
 python3 labnetwork.py refresh ~/LabNetwork/my-lab/workspace --scope 1 --dry-run
@@ -139,5 +141,5 @@ built by `onboard` have these links. For a network assembled another way, add th
 their page in the app, and the next refresh will include them. The digest says how many people in range were skipped
 for lack of a link. When OpenAlex splits a researcher across several author records, add each record's link to their
 sources: refresh, expand and the research library then read all of them as one person. The research library also adds
-the records with the same ORCID iD as a linked record; refresh and expand read only the links on the record. None of
-them reads a link that was marked as not theirs.
+the records with the same ORCID iD as a linked record, and expand reads the records the library holds for each person;
+refresh reads only the links on the record. None of them reads a link that was marked as not theirs.
