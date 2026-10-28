@@ -331,8 +331,8 @@ function collectionLine(p) {
   const c = p.collection;
   if (!c) return null;
   const st = c.standard || {};
+  const lab = c.degree === 0 || p.flags.degree === 0;
   if (c.status === "collected") {
-    const lab = c.degree === 0 || p.flags.degree === 0;
     const scope = lab ? "Their OpenAlex coauthors" : `Their coauthors on works since ${st.sinceYear || "the start year"}`;
     const total = typeof c.coauthors === "number" ?
       `, of ${count(c.coauthors, "OpenAlex coauthor", "OpenAlex coauthors")}${lab ? "" : ` since ${st.sinceYear}`}` : "";
@@ -346,14 +346,29 @@ function collectionLine(p) {
       noteMark(`${scope} were collected on ${c.date}, from papers with ${st.maxAuthors || 30} or fewer authors.`, rule,
         c.orcidWorks ? ` ${count(c.orcidWorks, "paper", "papers")} came from their ORCID record.` : "",
         c.unanchored ? ` ${count(c.unanchored, "work", "works")} on their OpenAlex ${records} ` +
-          `${c.unanchored === 1 ? "was" : "were"} left out: nothing ties ${c.unanchored === 1 ? "it" : "them"} to ` +
-          "their other work (a coauthor already in the network, a paper recorded with a lab member, or a shared " +
-          "institution), and OpenAlex sometimes files researchers with the same name under one record." : "",
+          `${c.unanchored === 1 ? "was" : "were"} left out. ${anchorRule(lab)}` : "",
         c.truncated ? " Only their 10,000 newest works were read." : "",
         c.basis ? ` OpenAlex identity: ${c.basis}.` : ""));
   }
+  const tie = c.status === "tie-unanchored" || c.status === "tie-unconfirmed";
+  const why = c.status === "unanchored" || tie ? ` ${anchorRule(lab || tie)}` : "";
+  const through = (c.through || []).length ? ` The papers are on the OpenAlex record of ${c.through.join(" and ")}.` : "";
+  const others = c.onlyThrough ? ` ${count(c.onlyThrough, "person", "people")} in the network ` +
+    `${c.onlyThrough === 1 ? "is" : "are"} tied to the lab only through them; earlier runs added them.` : "";
   return h("p", { class: "notice notice-quiet tienote" }, `Connections not collected: ${c.text}.`,
-    noteMark(`Recorded by the collection run on ${c.date}.`));
+    noteMark(`Recorded by the collection run on ${c.date}.`, through, why, others));
+}
+
+/** When a work on someone's OpenAlex record counts as theirs (see expand.py). */
+function anchorRule(lab) {
+  return (lab ?
+    "A lab member's work counts when it names another lab member, someone whose relationship with the lab is more " +
+    "than a coauthor record written from OpenAlex, or someone named on another member's works that count; when it " +
+    "is on the ORCID record whose iD is on their record; or when it lists them at their recorded institution" :
+    "A work counts when it names someone already in the network, was recorded with a lab member, or lists them at " +
+    "their recorded institution") +
+    " or at an institution where two such works list them. OpenAlex sometimes files researchers with the same name " +
+    "under one record.";
 }
 
 function count(n, one, many) {
