@@ -424,6 +424,7 @@ const COLLECTION_TEXT = {
   "not-found": "not found in OpenAlex",
   ambiguous: "with several matching OpenAlex authors",
   "not-looked-up": "not looked up (no doctorate or research relationship recorded)",
+  unanchored: "whose OpenAlex works connect to nothing recorded about them",
   stopped: "not reached before the spending limit",
   undone: "from an undone collection",
   none: "added after the last collection",

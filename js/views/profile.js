@@ -177,9 +177,12 @@ export class Drawer {
     sec.append(recent.el);
     const papers = [...(c.papers || [])].sort((a, b) => yearOf(b.year) - yearOf(a.year));
     sec.append(h("h3", { class: "tiegroup" }, `${libWorks.length ? "Papers in the notebook" : "Papers"} (${papers.length})`));
+    // The library leaves out the people expand added until their doctorate and position are known.
+    const skipped = p.librarySkipped ? "The research library looks up the people expand adds to the second degree " +
+      "once their doctorate is confirmed and their institution and position are known. " : "";
     if (!papers.length) {
       sec.append(h("p", { class: "dim" }, libWorks.length ? "None selected by hand." :
-        ["No papers recorded.", noteMark("An empty list is not evidence of no publications.")]));
+        ["No papers recorded.", noteMark(skipped, "An empty list is not evidence of no publications.")]));
     } else sec.append(listWithMore(papers, 5, paperItem, "works"));
     // Awards from NIH and NSF, then grants recorded by hand (an award already listed by hand is shown once).
     const grants = [...(c.grants || [])].sort((a, b) => (b.projectStartDate || b.period || "").localeCompare(a.projectStartDate || a.period || ""));
@@ -189,7 +192,7 @@ export class Drawer {
     sec.append(funded.el);
     sec.append(h("h3", { class: "tiegroup" }, `${awards.length ? "Grants in the notebook" : "Grants"} (${grants.length})`));
     if (!grants.length) sec.append(h("p", { class: "dim" }, awards.length ? "None recorded by hand." :
-      ["No grants recorded.", noteMark("An empty list does not mean no funding.")]));
+      ["No grants recorded.", noteMark(skipped, "An empty list does not mean no funding.")]));
     else sec.append(listWithMore(grants, 5, grantItem, "works"));
     if (lib) this.checkLatest(p.id, recent, funded, handNumbers, waiting);
     return sec;
@@ -329,12 +332,24 @@ function collectionLine(p) {
   if (!c) return null;
   const st = c.standard || {};
   if (c.status === "collected") {
-    const scope = c.degree === 0 || p.flags.degree === 0 ? "Their OpenAlex coauthors" :
-      `Their coauthors on works since ${st.sinceYear || "the start year"}`;
+    const lab = c.degree === 0 || p.flags.degree === 0;
+    const scope = lab ? "Their OpenAlex coauthors" : `Their coauthors on works since ${st.sinceYear || "the start year"}`;
+    const total = typeof c.coauthors === "number" ?
+      `, of ${count(c.coauthors, "OpenAlex coauthor", "OpenAlex coauthors")}${lab ? "" : ` since ${st.sinceYear}`}` : "";
+    const rule = lab ? " Each was linked, or added if not yet in the notebook." :
+      ` Coauthors already in the notebook were linked; others were added when they shared ${st.minShared || 2} or more ` +
+      `of these works${st.perPerson ? `, up to ${st.perPerson} per person` : ""}.`;
+    const records = (c.openalexIds || []).length > 1 ? "records" : "record";
     return h("p", { class: "notice notice-quiet tienote" },
       `Coauthors collected: ${count(c.added, "person", "people")} added and ${count(c.linked, "person", "people")} ` +
-      "already in the notebook linked.",
-      noteMark(`${scope} were collected on ${c.date}, from papers with ${st.maxAuthors || 30} or fewer authors.`,
+      `already in the notebook linked${total}.`,
+      noteMark(`${scope} were collected on ${c.date}, from papers with ${st.maxAuthors || 30} or fewer authors.`, rule,
+        c.orcidWorks ? ` ${count(c.orcidWorks, "paper", "papers")} came from their ORCID record.` : "",
+        c.unanchored ? ` ${count(c.unanchored, "work", "works")} on their OpenAlex ${records} ` +
+          `${c.unanchored === 1 ? "was" : "were"} left out: nothing ties ${c.unanchored === 1 ? "it" : "them"} to ` +
+          "their other work (a coauthor already in the network, a paper recorded with a lab member, or a shared " +
+          "institution), and OpenAlex sometimes files researchers with the same name under one record." : "",
+        c.truncated ? " Only their 10,000 newest works were read." : "",
         c.basis ? ` OpenAlex identity: ${c.basis}.` : ""));
   }
   return h("p", { class: "notice notice-quiet tienote" }, `Connections not collected: ${c.text}.`,

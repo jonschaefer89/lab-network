@@ -15,7 +15,7 @@
   {
    "path": "/lab/packet/notebook.schema.json",
    "url": "data/packet/notebook.schema.json.gz",
-   "bytes": 18702
+   "bytes": 18704
   },
   {
    "path": "/lab/workspace/changes.jsonl",
@@ -26,6 +26,11 @@
    "path": "/lab/workspace/library.json",
    "url": "data/workspace/library.json.gz",
    "bytes": 698784
+  },
+  {
+   "path": "/lab/workspace/packet-checks.json",
+   "url": "data/workspace/packet-checks.json.gz",
+   "bytes": 2706
   },
   {
    "path": "/lab/workspace/workspace.json",
