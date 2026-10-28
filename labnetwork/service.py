@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import describe
 from .graph import (ALL_TYPES, GROUP_PRIORITY, MODES, TYPE_GROUP_OF, TYPE_ORDER, Graph, TieFilter)
-from .model import BASE_VERSION, COLLECTIONS, KIND_TO_COLL, Notebook, name_key, norm_text
+from .model import BASE_VERSION, COLLECTIONS, KIND_TO_COLL, Notebook, list_item_key, name_key, norm_text
 from .packet import (bundled_schema, check_contact, check_edge, check_meeting, entity_schema, is_http_url,
                      validate_rules, validate_schema, validation_report)
 from .search import load_aliases, search_all as run_search
@@ -1426,6 +1426,10 @@ class Service:
                                          "added", "linked", "works", "coauthors", "unanchored", "orcidWorks",
                                          "truncated", "reason", "batchId")}
         out["text"] = STATUS_TEXT.get(info.get("status"), info.get("status", ""))
+        contacts = self.nb.records["contacts"]
+        out["through"] = [contacts[x]["name"] for x in info.get("through") or [] if x in contacts]
+        out["onlyThrough"] = sum(1 for x in info.get("onlyThrough") or [] if x in contacts
+                                 and x not in self.nb.archived["contacts"])
         return out
 
     # ---------------------------------------------------------------- Slack intake
@@ -1481,23 +1485,28 @@ class Service:
             return {"seq": written[0]["seq"], "people": len(note["people"]), "leftOut": len(unknown)}
 
     def undo_import(self, batch_id: str, actor: str) -> Dict[str, Any]:
-        """Archive every record an import batch created, and mark its collection note as undone.
+        """Archive every record an import batch created, take off the list items it added to existing records
+        (sources such as OpenAlex links, tags, papers and awards), and mark its collection note as undone.
 
-        Values the batch filled in or appended on existing records stay; the history shows each one.
+        Values the batch filled in on existing records stay; the history shows each one.
         """
         with self.lock:
             if batch_id not in self.nb.batches:
                 raise NotFound(f"No import batch '{batch_id}'")
             created = {"contacts": [], "edges": [], "meetings": []}
-            appended = 0
+            appended: Dict[Tuple[str, str], Dict[str, List[Any]]] = {}
+            filled = 0
             for ev in self.nb.events:
                 if ev.get("batch") != batch_id:
                     continue
                 kind, _, action = ev["op"].partition(".")
                 if kind in KIND_TO_COLL and action == "create":
                     created[KIND_TO_COLL[kind]].append(ev["id"])
-                elif action in ("update", "append"):
-                    appended += 1
+                elif kind in KIND_TO_COLL and action == "append":
+                    fields = appended.setdefault((KIND_TO_COLL[kind], ev["id"]), {})
+                    fields.setdefault(ev["data"]["field"], []).extend(ev["data"]["items"])
+                elif action == "update":
+                    filled += 1
             events = []
             gone = set()
             for coll in ("contacts", "edges", "meetings"):
@@ -1513,6 +1522,25 @@ class Service:
                                 events.append({"op": "edge.archive", "id": eid, "actor": actor,
                                                "data": {"cascadeFrom": rid, "undoBatch": batch_id}})
                                 gone.add(eid)
+            # The importer appends only items a record lacks, so these are the ones the batch added.
+            removed = 0
+            for (coll, rid), fields in appended.items():
+                rec = self.nb.records[coll].get(rid)
+                if rec is None or rid in gone or rid in self.nb.archived[coll]:
+                    continue
+                sets = {}
+                for field, items in fields.items():
+                    drop = {list_item_key(field, x) for x in items}
+                    keep = [x for x in rec.get(field) or [] if list_item_key(field, x) not in drop]
+                    if len(keep) < len(rec.get(field) or []):
+                        removed += len(rec[field]) - len(keep)
+                        sets[field] = keep
+                if sets:
+                    kind = {v: k for k, v in KIND_TO_COLL.items()}[coll]
+                    events.append({"op": f"{kind}.update", "id": rid, "actor": actor,
+                                   "data": {"set": sets, "prev": {f: copy.deepcopy(rec.get(f)) for f in sets},
+                                            "base": {f: self.nb.version(coll, rid, f) for f in sets},
+                                            "undoBatch": batch_id}})
             people = {pid: {"status": "undone", "reason": f"import batch {batch_id} was undone"}
                       for pid, info in self.nb.collection.items() if info.get("batchId") == batch_id}
             if people:
@@ -1522,7 +1550,7 @@ class Service:
             if events:
                 self._append(events)
             return {"batchId": batch_id, "archived": sum(1 for e in events if e["op"].endswith(".archive")),
-                    "keptUpdates": appended, "collectionReset": len(people)}
+                    "removedItems": removed, "keptUpdates": filled, "collectionReset": len(people)}
 
     def resolve_conflict(self, cid: str, payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
         with self.lock:

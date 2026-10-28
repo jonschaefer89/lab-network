@@ -53,6 +53,12 @@ class ConferenceTests(unittest.TestCase):
         with self.assertRaises(NotFound):
             self.svc.conference_list({"id": "srp-1999"})
 
+    def test_a_recorded_department_before_the_institution_still_matches(self):
+        self.svc.create_contact({"fields": {"name": "Jo Doeling",
+                                            "institution": "Department of Psychiatry, Lakeside University"}}, "test")
+        m = conferences.Matcher(Service(Workspace(self.ws.path)).nb)
+        self.assertEqual(m.match("J. Doeling", "Lakeside University")["basis"], "initials and institution")
+
     def test_search_and_profile(self):
         r = self.svc.search({"q": "AACAP", **EVERYONE})
         self.assertEqual(sorted({e["personId"] for e in r["events"]}), ["c1", "c3", "m1", "pi"])

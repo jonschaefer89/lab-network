@@ -163,7 +163,16 @@ lab member. A preprint and its article count as one paper, and corrections not a
 linked to a person and the papers they list on ORCID. OpenAlex sometimes files two researchers with the same name under
 one record, so a paper counts only when it names someone already in the network (other than people that `expand` or
 onboarding added to the second degree), was recorded with a lab member, or lists the person at their recorded
-institution or at an institution where two such papers list them.
+institution or at an institution where two such papers list them. A person confirms a lab member's OpenAlex record,
+not each paper on it, so a lab member's paper counts when it names another lab member, someone whose relationship with
+the lab is more than a coauthor record written from OpenAlex (onboarding, `expand` and the scheduled refresh write
+those, and their evidence says "indexed by OpenAlex"), or someone named on another member's papers that count;
+is on the ORCID record whose iD is on the member's own record; or lists them at their recorded institution or at an
+institution where two such papers list them. A first-degree person whose only relationship with the lab is a coauthor
+record written from OpenAlex keeps it, but `expand` collects their coauthors only when one of those papers names them;
+their profile says why it did not. If you add the lab member's ORCID iD to their record, or record a relationship with
+one of the paper's coauthors, the paper counts. An ORCID iD that OpenAlex shows on a lab member's author record is
+listed in the run's digest for you to check, and it does not count until you add it.
 `--per-person N` adds at most N people for each first-degree person.
 
 ```bash
@@ -217,7 +226,7 @@ stops before using it up, so filling a library of about 1,600 people takes a few
 | `conference WORKSPACE FILE` | Import a conference program |
 | `not-theirs WORKSPACE PERSON RECORD` | Mark an OpenAlex record as not a person's |
 | `import WORKSPACE FILE` / `export WORKSPACE` | Import a spreadsheet with a preview; export a bundle, notebook or CSV |
-| `undo-import WORKSPACE BATCH` | Archive everything one import batch added |
+| `undo-import WORKSPACE BATCH` | Archive the records one import batch created and remove the items it added to existing records |
 | `validate PACKET` / `init PACKET WORKSPACE` | Check a packet; create a workspace for one |
 | `config WORKSPACE` | Show or change settings such as `--degree-limit` and `--live-check` |
 | `refresh WORKSPACE` | Add new papers and coauthors to profiles (the older update) |

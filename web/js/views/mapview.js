@@ -425,6 +425,8 @@ const COLLECTION_TEXT = {
   ambiguous: "with several matching OpenAlex authors",
   "not-looked-up": "not looked up (no doctorate or research relationship recorded)",
   unanchored: "whose OpenAlex works connect to nothing recorded about them",
+  "tie-unanchored": "tied to the lab only by a lab member's papers that may be a namesake's",
+  "tie-unconfirmed": "whose coauthor record with the lab no lab member's paper confirms",
   stopped: "not reached before the spending limit",
   undone: "from an undone collection",
   none: "added after the last collection",

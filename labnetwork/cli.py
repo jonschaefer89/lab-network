@@ -328,8 +328,9 @@ def cmd_undo_import(args):
             res = Service(ws).undo_import(args.batch, args.actor)
         finally:
             ws.release_lock()
-    print(f"Archived {res['archived']} records created by {res['batchId']}. "
-          f"{res['keptUpdates']} additions to existing records stay (see each record's history).")
+    print(f"Archived {res['archived']} records created by {res['batchId']} and removed {res.get('removedItems', 0)} "
+          f"items it added to existing records. {res['keptUpdates']} changes that filled in values stay (see each "
+          "record's history).")
     return 0
 
 
@@ -700,7 +701,7 @@ def main(argv=None):
                    help="add or correct a lab member's Slack account, such as U0123ABCD=maria-rivera (repeatable; "
                         "leave the person empty to remove someone)")
     s.set_defaults(fn=cmd_intake)
-    s = sub.add_parser("undo-import", help="archive everything one import batch created")
+    s = sub.add_parser("undo-import", help="archive what one import batch created and remove what it added")
     s.add_argument("workspace")
     s.add_argument("batch", help="the batch ID, such as imp-...")
     s.add_argument("--actor", default="undo-import")

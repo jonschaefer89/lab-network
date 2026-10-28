@@ -215,7 +215,9 @@ class Matcher:
         scored = [(name_score(name, c["name"]), pid, c) for pid, c in cands]
         full = [(pid, c) for s, pid, c in scored if s == 2]
         partial = [(pid, c) for s, pid, c in scored if s == 1]
-        inst = lambda c: bool(institution) and _inst_match(institution, c.get("institution", ""))
+        # Either value may be the longer one ("Department of Psychiatry, Lakeside University" and "Lakeside University").
+        inst = lambda c: bool(institution) and (_inst_match(institution, c.get("institution", "")) or
+                                                _inst_match(c.get("institution", ""), institution))
         if len(full) == 1:
             pid, c = full[0]
             return {"person": pid, "basis": "name and institution" if inst(c) else "name"}

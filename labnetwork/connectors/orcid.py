@@ -22,6 +22,18 @@ def record_url(orcid: str) -> str:
     return f"https://orcid.org/{clean(orcid)}"
 
 
+def valid(orcid: str) -> bool:
+    """Whether an iD has ORCID's form and check digit (ISO 7064 MOD 11-2), so a mistyped iD is caught."""
+    m = re.fullmatch(r"(\d{4})-(\d{4})-(\d{4})-(\d{3})([\dX])", clean(orcid).upper())
+    if not m:
+        return False
+    total = 0
+    for d in "".join(m.groups()[:4]):
+        total = (total + int(d)) * 2
+    check = (12 - total % 11) % 11
+    return m.group(5) == ("X" if check == 10 else str(check))
+
+
 def _summaries(data: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
     out = []
     for g in (data or {}).get("affiliation-group") or []:
@@ -66,10 +78,11 @@ def activities(client: Client, orcid: str) -> Tuple[List[Dict[str, Any]], List[D
     return edus, [_emp(e) for e in _summaries(data.get("employments"), "employment-summary")]
 
 
-def work_dois(client: Client, orcid: str) -> List[Tuple[str, Optional[int]]]:
+def work_dois(client: Client, orcid: str, fresh: bool = False) -> List[Tuple[str, Optional[int]]]:
     """(DOI, publication year) for each work the person lists on their ORCID record that has a DOI, in one request.
-    DOIs are lowercase, without the https://doi.org/ prefix."""
-    data = client.get(f"{API}/{clean(orcid)}/works") or {}
+    DOIs are lowercase, without the https://doi.org/ prefix. `fresh` reads the record again instead of the cached
+    copy."""
+    data = client.get(f"{API}/{clean(orcid)}/works", use_cache=not fresh) or {}
     out = []
     for g in data.get("group") or []:
         doi = ""

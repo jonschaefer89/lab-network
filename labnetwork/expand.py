@@ -10,7 +10,13 @@ the library joined to them by ORCID iD); a record marked as not theirs never cou
 1. Lab members without OpenAlex records are looked up by name and accepted only when their OpenAlex works include
    papers already recorded for them (two or more; one when only one is recorded).
 2. First degree: every coauthor of a lab member on papers with 30 or fewer authors is connected to that member.
-   Coauthors already in the notebook gain a coauthor record if they lack one; the rest are added.
+   Coauthors already in the notebook gain a coauthor record if they lack one; the rest are added. A person confirmed
+   the member's OpenAlex record, not each work on it, so a work counts only when it names another lab member, someone
+   whose relationship with the lab is more than a coauthor record written from OpenAlex, or someone named on another
+   member's works that count; is on the ORCID record whose iD is on the member's own record; or lists them at their
+   recorded institution or at an institution where two such works list them. A first-degree person whose only
+   relationship with the lab is a coauthor record written from OpenAlex is collected in step 4 only when this step
+   finds them on a lab member's works that count.
 3. A first-degree person already in the notebook without OpenAlex records is identified on the lab members' OpenAlex
    papers: the author whose name matches theirs, preferring a paper already recorded between them. People without a
    shared paper who have a confirmed doctorate or a research relationship are looked up by name and accepted only
@@ -61,14 +67,22 @@ ORCID_RX = re.compile(r"orcid\.org/(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", re.I)
 NOTICE_RX = re.compile(r"\s*((author |publisher )?(correction|erratum|corrigendum)(\s*:|\s+(to|notice)\b|\s*$)"
                        r"|retract(ion|ed)\b|notice of retraction\b|expression of concern\b)", re.I)  # not papers
 SECOND_DEGREE_TAGS = {"expand-second-degree", "openalex-second-degree"}       # added by expand, or by onboarding
+AUTOMATED_ACTORS = ("expand", "scheduled refresh")      # the runs that write coauthor records from OpenAlex
+NIH_AWARD_TITLE, NIH_PROFILE_NOTE = "NIH RePORTER award record", "NIH RePORTER PI profile ID"     # onboarding's wording
+# The notes onboarding and expand write beside an ORCID iD they took from an OpenAlex author record.
+OPENALEX_ORCID_NOTES = ("ORCID iD listed on the OpenAlex record", "ORCID iD on their OpenAlex record",
+                        "ORCID record, read by expand", "ORCID employment record")
 
 STATUS_TEXT = {
     "collected": "coauthors collected from OpenAlex",
     "not-found": "not found in OpenAlex",
     "ambiguous": "several OpenAlex authors match; not collected until someone confirms which is theirs",
     "not-looked-up": "not looked up: no confirmed doctorate or research relationship recorded",
-    "unanchored": ("no OpenAlex work of theirs since the start year shares a coauthor with the network, a paper "
-                   "recorded with a lab member, or their recorded institution"),
+    "unanchored": "none of their OpenAlex works connects to anything else known about them",
+    "tie-unanchored": ("the only papers that tie them to the lab are on a lab member's OpenAlex record but connect to "
+                       "nothing else known about the lab member, so they may be a namesake's"),
+    "tie-unconfirmed": ("no lab member's OpenAlex works that count name them, so nothing confirms their coauthor record "
+                        "with the lab"),
     "stopped": "not reached: the run stopped at its spending limit",
     "undone": "an earlier collection was undone",
 }
@@ -135,9 +149,32 @@ def name_score(a: str, b: str) -> int:
     return 1 if ga[0][0] == gb[0][0] else 0
 
 
-def _inst_match(a: str, b: str) -> bool:
-    x, y = norm_text(a), norm_text(b)
-    return bool(x) and bool(y) and (x in y or y in x)
+AFFILIATED_UNITS = {"medical center", "medical centre", "school of medicine", "medical school", "medical college",
+                    "health", "health system", "health sciences", "health science center", "hospital", "hospitals"}
+
+
+def _inst_words(name: str) -> str:
+    x = norm_text((name or "").replace("&", " and "))
+    return x[4:] if x.startswith("the ") else x
+
+
+def _inst_match(recorded: str, named: str) -> bool:
+    """Whether an institution named on a paper is one recorded for a person: the same name, or the same name followed
+    by an affiliated unit ('Lakeside University' and 'Lakeside University Medical Center'). Either value may list
+    several institutions (separated by ';'), and a recorded one may put a department before one (separated by ','),
+    which then has to match by its whole name. A name inside a
+    longer one is not enough: 'University of California' is not every campus, and 'University of Pennsylvania'
+    is not 'Indiana University of Pennsylvania'."""
+    whole = {_inst_words(a) for a in {recorded or "", *(recorded or "").split(";")}} - {""}
+    pieces = {_inst_words(a) for a in re.split(r"[;,]", recorded or "")} - {""}
+    for y in {_inst_words(b) for b in {named or "", *(named or "").split(";")}} - {""}:
+        if y in pieces:                 # "Department of Psychology, Lakeside University", but not "..., Boston"
+            return True                 # for "Boston Medical Center"
+        for x in whole:
+            short, long_ = sorted((x, y), key=len)
+            if x == y or (long_.startswith(short + " ") and long_[len(short) + 1:] in AFFILIATED_UNITS):
+                return True
+    return False
 
 
 # --------------------------------------------------------------------------- OpenAlex reads
@@ -204,14 +241,15 @@ def _orcid_listed(client: Client, orcid: str, have: List[Dict[str, Any]], since_
 
 
 def _selves(w: Dict[str, Any], name: str, orcid: str) -> Set[str]:
-    """The authorships on a work that name the person: their ORCID iD, or a name that can be theirs."""
+    """The authorships on a work that name the person: their ORCID iD, or their name with the full first name (an
+    initial could be a coauthor's)."""
     out = set()
     for a in w.get("authorships") or []:
         au = a.get("author") or {}
         if not au.get("id"):
             continue
         if (orcid and oc.clean(au.get("orcid") or "").upper() == orcid) or \
-                name_score(name, au.get("display_name") or a.get("raw_author_name") or ""):
+                name_score(name, au.get("display_name") or a.get("raw_author_name") or "") == 2:
             out.add(oa.short_id(au["id"]))
     return out
 
@@ -369,6 +407,8 @@ class _Plan:
             for a in ids:
                 self.by_oa.setdefault(a, pid)
         self.pairs = {tuple(sorted((e["from"], e["to"]))) for _, e in self.nb.active("edges") if e["type"] == "coauthor"}
+        # Who wrote each relationship record added after the packet (the packet's come from onboarding).
+        self.made_by = {ev["id"]: ev.get("actor") or "" for ev in self.nb.events if ev["op"] == "edge.create"}
         self.new_people: Dict[str, Dict[str, Any]] = {}     # OpenAlex id -> plan
         self.new_names: Dict[str, str] = {}                 # planned person ID -> name
         self.edges: List[Dict[str, Any]] = []
@@ -403,6 +443,38 @@ class _Plan:
         o = self.library_openalex(pid)
         found += [(o.get("summary") or {}).get("orcid", ""), (o.get("orcidGroup") or {}).get("orcid", "")]
         return list(dict.fromkeys(x for x in (oc.clean(f).upper() for f in found) if x))
+
+    def given_orcids(self, pid: str) -> List[str]:
+        """The ORCID iDs on someone's own record, which a person gave or confirmed. Not an iD that OpenAlex shows on
+        their author record: a record that holds a namesake's papers can carry the namesake's iD."""
+        c = self.contacts[pid]
+        found = [m for s in c.get("sources") or [] if not (s.get("note") or "").startswith(OPENALEX_ORCID_NOTES)
+                 for m in ORCID_RX.findall(s.get("url", ""))]
+        found += ORCID_RX.findall(c.get("profileSourceUrl", ""))
+        return list(dict.fromkeys(x for x in (oc.clean(f).upper() for f in found) if x))
+
+    def from_openalex(self, e: Dict[str, Any]) -> bool:
+        """Whether a relationship record is a coauthor record written from OpenAlex: by expand or the scheduled refresh,
+        or with evidence that says so (onboarding's, and every record those runs write, cite works "indexed by
+        OpenAlex"). A coauthor record taken from another public source, such as a paper's author list on PubMed, is
+        not."""
+        actor = self.made_by.get(e["id"]) or ""
+        return e["type"] == "coauthor" and e.get("provenance") == "public" and (
+            actor.startswith(AUTOMATED_ACTORS) or "openalex" in f"{e.get('evidence', '')} {e.get('sourceTitle', '')}".lower())
+
+    def entered(self, a: str, b: str) -> bool:
+        """Whether a relationship record between two people shows more than an OpenAlex coauthorship. Onboarding joins
+        a lab member's NIH co-investigator to someone already in the notebook by name alone, so its shared-award record
+        counts only when the person carries the NIH RePORTER profile ID onboarding found for the co-investigator."""
+        for e in self.g.records_between(a, b):
+            if self.from_openalex(e):
+                continue
+            if e["type"] == "grant" and e.get("sourceTitle") == NIH_AWARD_TITLE and not all(
+                    any(NIH_PROFILE_NOTE in (s.get("note") or "") for s in self.contacts[x].get("sources") or [])
+                    for x in (a, b) if x not in self.lab):
+                continue
+            return True
+        return False
 
     def known_papers(self, pid: str) -> List[Set[str]]:
         """Papers already recorded for a person (their profile and their coauthor records), each as its set of
@@ -593,6 +665,120 @@ def _orcid_owners(P: _Plan) -> Dict[str, str]:
     return owners
 
 
+def _orcid_on(w: Dict[str, Any], aid: str) -> str:
+    """The ORCID iD on an author's record as a work lists it, or ''."""
+    for a in w.get("authorships") or []:
+        au = a.get("author") or {}
+        if oa.short_id(au.get("id") or "") == aid:
+            return oc.clean(au.get("orcid") or "").upper()
+    return ""
+
+
+def _only_through(P: _Plan, flagged: Set[str]) -> Dict[str, List[str]]:
+    """For each flagged person, the people within two degrees of the lab who would be further out without the flagged
+    people, found through chains of such people that start beside them."""
+    def within_two(skip: Set[str]) -> Set[str]:
+        seen = {r for r in P.lab if r in P.active}
+        frontier = set(seen)
+        for _ in range(2):
+            frontier = {y for x in frontier for y in P.g.nbrs.get(x, ()) if y not in seen and y not in skip}
+            seen |= frontier
+        return seen
+    dropped = within_two(set()) - within_two(flagged) - flagged
+    out: Dict[str, List[str]] = {}
+    for p in flagged:
+        found, stack = set(), [o for o in P.g.nbrs.get(p, ()) if o in dropped]
+        while stack:
+            o = stack.pop()
+            if o not in found:
+                found.add(o)
+                stack += [x for x in P.g.nbrs.get(o, ()) if x in dropped and x not in found]
+        if found:
+            out[p] = sorted(found)
+    return out
+
+
+def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], checks: List[str]) -> Set[str]:
+    """The DOIs a lab member lists on the ORCID records whose iDs are on their own record, read fresh each run. An iD
+    that OpenAlex shows on their author record but that is not on their record does not count; it is listed for a
+    person to check."""
+    name, given, dois = P.contacts[pid]["name"], P.given_orcids(pid), set()
+    for o in given:
+        if not oc.valid(o):
+            errors.append(f"{name}: the ORCID iD {o} on their record is not a valid iD (its check digit does not "
+                          "match). Correct it on their record so the papers they list there can count.")
+            continue
+        try:
+            dois |= {d for d, _ in oc.work_dois(client, o, fresh=True)}
+        except BudgetReached:
+            raise
+        except HttpError as exc:
+            errors.append(f"{name}: ORCID record {o} could not be read ({exc}), so no work of theirs counted for being "
+                          "listed there.")
+    for o in P.orcids(pid):
+        if o not in given:
+            checks.append(f"{name}: their OpenAlex record lists the ORCID iD {o}, which is not on their record. If it "
+                          f"is theirs, add {oc.record_url(o)} to their record, and the papers they list there will "
+                          "count. If it is not, OpenAlex may have filed another researcher's papers under their record.")
+    return dois
+
+
+def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[str, Any]]], beyond_oa: Set[str],
+                       errors: List[str], checks: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]],
+                                                                       Dict[str, List[Dict[str, Any]]]]:
+    """The works that count for each lab member, and the works left out. A person confirmed each member's OpenAlex
+    record, not each work on it, and OpenAlex sometimes files two researchers with the same name under one record. A
+    work counts when it names another lab member, someone whose relationship with the lab shows more than an OpenAlex
+    coauthorship (`beyond_oa`), or someone named on another member's works that count; when it is on an ORCID
+    record whose iD is on the member's own record; or when it lists the member at their recorded institution or at an
+    institution where two such works list them. Members' works vouch for one another's coauthors, so the works that
+    count are found in passes until a pass adds none."""
+    mine = {pid: set(P.oa_of[pid]) for pid in lab_works}
+    listed = {pid: _given_orcid_works(P, client, pid, errors, checks) for pid in lab_works}
+    found: Dict[Tuple[str, str], Optional[str]] = {}
+
+    def who(aid: str, nm: str, ins: List[str], pid: str) -> Optional[str]:
+        """The person in the notebook an authorship names: by OpenAlex ID, else by full name and a tie to the member."""
+        if (aid, pid) not in found:
+            q = P.by_oa.get(aid)
+            if q is None:
+                q, _, firm = P.existing_match(nm, set(ins), pid, aid)
+                q = q if firm else None
+            found[(aid, pid)] = q
+        return found[(aid, pid)]
+
+    named: Dict[str, Set[str]] = {pid: set() for pid in lab_works}    # OpenAlex IDs and people on works that count
+    kept: Dict[str, List[Dict[str, Any]]] = {pid: [] for pid in lab_works}
+    changed = True
+    while changed:
+        changed = False
+        for pid, works in lab_works.items():
+            others = set().union(*(named[o] for o in lab_works if o != pid))
+            places = [x.strip() for x in (P.contacts[pid].get("institution") or "").split(";") if x.strip()]
+
+            def anchored(w: Dict[str, Any]) -> bool:
+                for aid, nm, ins in _authorships(w):
+                    if aid in mine[pid]:
+                        if any(_inst_match(p, i) for p in places for i in ins):
+                            return True
+                        continue
+                    q = who(aid, nm, ins, pid)
+                    if aid in others or (q is not None and (q in others or q in beyond_oa or
+                                                            (q in P.lab and q != pid))):
+                        return True
+                return (w.get("doi") or "").lower().replace("https://doi.org/", "") in listed[pid]
+            kept[pid], _ = _anchored(works, mine[pid], anchored)
+            now = {x for w in kept[pid] for aid, nm, ins in _authorships(w) if aid not in mine[pid]
+                   for x in (aid, who(aid, nm, ins, pid)) if x}
+            if now != named[pid]:
+                named[pid], changed = now, True
+    left = {}
+    for pid, works in lab_works.items():
+        ids = {id(w) for w in kept[pid]}
+        left[pid] = [w for w in works if id(w) not in ids]
+    return kept, left
+
+
 def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person: Optional[int] = None,
                 min_shared: int = 2, only: Optional[List[str]] = None, log: Callable[[str], None] = print,
                 lib: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -611,6 +797,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
 
     # 1. Lab members, accepted only on works already recorded for them.
     lab_works: Dict[str, List[Dict[str, Any]]] = {}
+    read_failed: Set[str] = set()       # lab members whose OpenAlex records could not be searched or read
     for pid in lab:
         name = contacts[pid]["name"]
         if pid not in P.oa_of:
@@ -629,6 +816,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
                 raise
             except HttpError as exc:
                 errors.append(f"{name}: {exc}")
+                read_failed.add(pid)
             if accepted:
                 P.oa_of[pid] = [a for a, _ in accepted]
                 for a, _ in accepted:
@@ -639,36 +827,64 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
                                             f"paper{'s' if hits != 1 else ''} already recorded for them"}
         if pid in P.oa_of:
             try:
-                lab_works[pid], _ = _all_works(client, P.oa_of[pid], max_authors=None)
+                lab_works[pid], _ = _all_works(client, P.oa_of[pid])
             except BudgetReached:
                 raise
             except HttpError as exc:
                 errors.append(f"{name}: {exc}")
-                coverage[pid] = {"status": "not-found", "degree": 0, "reason": str(exc)}
-                log(f"  {name}: OpenAlex could not be read ({exc})")
+                log(f"  {name}: OpenAlex could not be read ({exc}); their earlier note stays")
+                read_failed.add(pid)
                 continue
-            log(f"  {name}: {len(lab_works[pid])} OpenAlex works")
+            log(f"  {name}: {len(lab_works[pid])} OpenAlex works with {MAX_AUTHORS} or fewer authors")
+        elif pid in read_failed:
+            log(f"  {name}: OpenAlex could not be searched; their earlier note stays")
         else:
             coverage[pid] = {"status": "not-found", "degree": 0}
             log(f"  {name}: not found in OpenAlex")
     lab_ids = {a for pid in lab for a in P.oa_of.get(pid, [])}
+    # People whose relationship with the lab shows more than an OpenAlex coauthorship.
+    beyond_oa = {q for o in P.lab for q in P.g.nbrs.get(o, ()) if q not in P.lab and P.entered(q, o)}
+    checks: List[str] = []
+    lab_works, lab_left = _lab_members_works(P, client, lab_works, beyond_oa, errors, checks)
 
-    # 2. Complete the first degree: every coauthor of a lab member (papers with 30 or fewer authors).
+    # 2. Complete the first degree: every coauthor of a lab member on the works that count.
     new_first: List[str] = []
+    reached: Set[str] = set()          # people named with a lab member on works that count
+    held_named: Dict[str, str] = {}    # person -> a note for a person to check, if they turn out to be unconfirmed
     for pid, works in lab_works.items():
+        left_out = len(lab_left[pid])
+        if left_out and not works:
+            coverage[pid] = {"status": "unanchored", "degree": 0, "works": 0, "unanchored": left_out}
+            continue
         ranked, counts, latest, names, insts = _coauthor_counts(works, set(P.oa_of[pid]))
         for aid in ranked:
             if aid in lab_ids:
                 continue
             target, held = P.resolve(aid, names[aid], insts[aid], pid, counts[aid], 1)
             if held:
+                # Held back for having the full name of someone tied to the member, under another OpenAlex record: it
+                # names them when the institution or ORCID iD agrees. Otherwise a person decides.
+                _, same, _ = P.existing_match(names[aid], insts[aid], pid, aid)
+                if same in P.g.nbrs.get(pid, ()) and name_score(contacts[same]["name"], names[aid]) == 2:
+                    orcid = _orcid_on(latest[aid], aid)
+                    if any(_inst_match(contacts[same].get("institution", ""), i) for i in insts[aid]) or \
+                            (orcid and orcid in P.orcids(same)):
+                        reached.add(same)
+                    else:
+                        held_named.setdefault(same, (
+                            f"{P.name(pid)}'s OpenAlex paper “{oa.work_title(latest[aid])[:150]}” names "
+                            f"{names[aid]} under the record {oa.author_url(aid)}, which is not linked to "
+                            f"{contacts[same]['name']}'s record. If it is theirs, add it to their record."))
                 continue
             if target is None:
                 target = P.add_person(aid, names[aid], pid, counts[aid], insts[aid], degree=1)
                 new_first.append(aid)
+            reached.add(target)
             if P.add_edge(pid, target, counts[aid], latest[aid], None):
                 swept[pid].append((aid, target))
         coverage[pid] = {"status": "collected", "degree": 0, "works": len(works), "coauthors": len(counts)}
+        if left_out:
+            coverage[pid]["unanchored"] = left_out
     # A new first-degree person whose OpenAlex record carries the ORCID iD of someone in the notebook, or of another
     # new person, is held back before anyone is added through them.
     owners = _orcid_owners(P)
@@ -681,10 +897,42 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     # People already in the notebook whom this run gives their first coauthor record with a lab member are first
     # degree once it is applied, so their coauthors are collected in the same run.
     first = sorted(set(first) | {t for recs in swept.values() for _, t in recs if t in P.active and dist.get(t, 2) > 1})
+    # A first-degree person whose only relationship with the lab is a coauthor record written from OpenAlex is
+    # collected when this run finds them on a lab member's works that count. Otherwise that record may come from a
+    # namesake's paper on the member's OpenAlex record, from a paper with more than 30 authors, or from a record no
+    # longer linked to the member, so they are not collected; nor do they vouch for anyone's papers. This is decided for
+    # the whole first degree, also in a run for named people only.
+    left_named: Dict[str, Set[str]] = defaultdict(set)      # person -> members whose left-out works name them
+    for pid, works in lab_left.items():
+        for w in works:
+            for aid, nm, ins in _authorships(w):
+                if aid not in P.oa_of[pid]:
+                    q = P.by_oa.get(aid) or P.existing_match(nm, set(ins), pid, aid)[0]
+                    if q:
+                        left_named[q].add(pid)
+    unshown = {p for p in first if p not in reached and p not in beyond_oa}
+    # Someone tied to a lab member whose OpenAlex records could not be read is not judged: their earlier note stays.
+    unjudged = {p for p in unshown if read_failed & P.g.nbrs.get(p, set())}
+    if unjudged:
+        errors.append(f"{len(unjudged)} first-degree {'person was' if len(unjudged) == 1 else 'people were'} not "
+                      "collected because a lab member's OpenAlex records could not be read; the next run checks them "
+                      "again.")
     if only:
         wanted = {norm_text(x) for x in only}
         first = [p for p in first if p in only or norm_text(contacts[p]["name"]) in wanted]
         new_first = [a for a in new_first if norm_text(P.new_people[a]["name"]) in wanted]
+    first = [p for p in first if p not in unjudged]
+    n_first = len(first) + len(new_first)
+    only_through = _only_through(P, unshown)
+    for p in first:
+        if p in unshown:
+            coverage[p] = ({"status": "tie-unanchored", "degree": 1, "through": sorted(left_named[p])}
+                           if p in left_named else {"status": "tie-unconfirmed", "degree": 1})
+            if only_through.get(p):         # people earlier runs added who are in the network only through them
+                coverage[p]["onlyThrough"] = only_through[p]
+            if p in held_named:
+                checks.append(held_named[p])
+    first = [p for p in first if p not in unshown]
 
     # 3. Identify first-degree people already in the notebook, on the same works that make someone first degree.
     lab_coauthors: Dict[str, List[Tuple[str, str, str, Set[str]]]] = defaultdict(list)
@@ -776,8 +1024,8 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     # the second degree: they are known only from the kind of OpenAlex coauthorship this step checks, and counting them
     # would let each run vouch for the papers the run before it left out.
     first_set = set(first)
-    anchors = {aid: q for aid, q in P.by_oa.items()
-               if q in first_set or not SECOND_DEGREE_TAGS & set((contacts.get(q) or {}).get("tags") or [])}
+    anchors = {aid: q for aid, q in P.by_oa.items() if q not in unshown and
+               (q in first_set or not SECOND_DEGREE_TAGS & set((contacts.get(q) or {}).get("tags") or []))}
     roots = set(lab) | {P.new_people[a]["id"] for a in new_first}
 
     def independent(q: str, pid: str) -> bool:
@@ -924,13 +1172,14 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     return {
         "notebook": {"schemaVersion": 1, "contacts": updates + new_contacts, "edges": P.edges, "meetings": []},
         "coverage": coverage,
-        "report": {"held": P.held, "errors": errors, "requests": client.requests, "costUsd": round(client.cost_usd, 4),
+        "report": {"held": P.held, "errors": errors, "checks": checks, "requests": client.requests,
+                   "costUsd": round(client.cost_usd, 4),
                    "newFirstDegree": sum(1 for p in P.new_people.values() if p["degree"] == 1),
                    "newSecondDegree": sum(1 for p in P.new_people.values() if p["degree"] == 2),
                    "linksAdded": len(updates)},
         "standard": {"sinceYear": since_year, "perPerson": per_person, "minShared": min_shared,
                      "maxAuthors": MAX_AUTHORS},
-        "firstDegree": len(first) + len(new_first), "stopped": stopped,
+        "firstDegree": n_first, "stopped": stopped,
     }
 
 
@@ -1022,6 +1271,8 @@ def expand(ws_path: str, since_year: int = 2016, per_person: Optional[int] = Non
         f"{len(nbk['edges'])} new coauthor records, {rep['linksAdded']} OpenAlex links on existing records, "
         f"{len(rep['held'])} held back as possible duplicates. {client.requests} requests, "
         f"${client.cost_usd:.4f} of OpenAlex's daily allowance.")
+    for c in rep.get("checks") or []:
+        log(f"To check: {c}")
     if plan["stopped"]:
         log("The run reached its spending limit before it finished; run expand again tomorrow to add the rest.")
     if dry_run:
@@ -1100,7 +1351,12 @@ def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dic
             f"up to {st['perPerson']} others with {st['minShared']} or more shared works were added per person")
     works = lambda n: f"{n} {'work' if n == 1 else 'works'}"
     lines = [f"# Network expansion, {today()}", "",
-             f"First degree: every OpenAlex coauthor of a lab member (papers with {st['maxAuthors']} or fewer authors). "
+             f"First degree: every OpenAlex coauthor of a lab member on papers with {st['maxAuthors']} or fewer authors. "
+             f"A lab member's paper counted when it names another lab member, someone whose relationship with the lab "
+             f"is more than a coauthor record written from OpenAlex, or someone named on another member's papers that "
+             f"count; is on the ORCID record whose iD is on their record; or lists them at their recorded institution "
+             f"or at an institution where two such papers list them. A first-degree person whose only relationship "
+             f"with the lab is a coauthor record written from OpenAlex was collected only when such a paper names them. "
              f"Second degree: for each first-degree person found in OpenAlex, coauthors on works since "
              f"{st['sinceYear']}, from every OpenAlex record linked to them and the papers they list on ORCID. A work "
              f"counted when it names someone already in the network, was recorded with a lab member, or lists the "
@@ -1115,6 +1371,7 @@ def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dic
                  f"file beside this one gives each reason." if ap.get("skipped") or ap.get("rejected")
                  else "") +
              f" {rep['requests']} requests; ${rep['costUsd']:.4f} of OpenAlex's daily allowance.", ""]
+    made = {ev["id"]: ev.get("batch") or "" for ev in svc.nb.events if ev["op"] == "contact.create"}
     by_status: Dict[str, List[str]] = defaultdict(list)
     for pid, v in sorted(plan["coverage"].items(), key=lambda kv: names.get(kv[0], kv[0])):
         extra = ""
@@ -1124,8 +1381,17 @@ def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dic
                 extra += f"; {works(v['unanchored'])} left out as unconnected"
         elif v["status"] == "unanchored":
             extra = f": {works(v['unanchored'])}"
+        elif v["status"] in ("tie-unanchored", "tie-unconfirmed"):
+            if v.get("through"):
+                extra = f" (through {', '.join(names.get(o, o) for o in v['through'])})"
+            if v.get("onlyThrough"):
+                batches = sorted({made.get(o, "") for o in v["onlyThrough"]} - {""})
+                extra += (f"; in the network only through them: "
+                          f"{', '.join(names.get(o, o) for o in v['onlyThrough'])}"
+                          + (f" (added by import batch {', '.join(batches)})" if batches else ""))
         by_status[v["status"]].append(f"- {names.get(pid, pid)}{' (lab member)' if v.get('degree') == 0 else ''}{extra}")
-    for s in ("collected", "unanchored", "ambiguous", "not-found", "not-looked-up", "stopped"):
+    for s in ("collected", "unanchored", "tie-unanchored", "tie-unconfirmed", "ambiguous", "not-found", "not-looked-up",
+              "stopped"):
         if by_status.get(s):
             lines += [f"## {STATUS_TEXT[s][0].upper() + STATUS_TEXT[s][1:]} ({len(by_status[s])})"] + by_status[s] + [""]
     by_import = result.get("heldForReview", [])
@@ -1147,6 +1413,8 @@ def _write_digest(ws: Workspace, svc: Service, plan: Dict[str, Any], result: Dic
                 why = f" ({x['match']})"
             lines.append(f"- {x['name']}{why}")
         lines.append("")
+    if rep.get("checks"):
+        lines += ["## For a person to check"] + [f"- {c}" for c in rep["checks"]] + [""]
     if rep["errors"]:
         lines += ["## Problems"] + [f"- {e}" for e in rep["errors"]] + [""]
     path = os.path.join(ddir, f"expand-{today()}-{result['batchId'].split('-')[1][9:15]}.md")   # one per batch

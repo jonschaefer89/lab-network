@@ -192,8 +192,12 @@ class ExpandTests(unittest.TestCase):
         self.assertEqual(dist[ids["Nia Newcoauthor"]], 1)
         self.assertEqual(dist[ids["Ola Otherperson"]], 2)
         self.assertEqual(dist["c3"], 1)              # was second degree before the new coauthor record
+        self.assertIn("https://openalex.org/A5", [x["url"] for x in svc.nb.records["contacts"]["m1"]["sources"]])
         out = svc.undo_import(batch, "test")
         self.assertGreater(out["archived"], 0)
+        # The OpenAlex link the run wrote to Morgan's record comes off again.
+        self.assertGreaterEqual(out["removedItems"], 1)
+        self.assertNotIn("https://openalex.org/A5", [x["url"] for x in svc.nb.records["contacts"]["m1"]["sources"]])
         self.assertNotIn("Ola Otherperson", {c["name"] for _, c in svc.nb.active("contacts")})
         self.assertEqual(svc.nb.collection["c1"]["status"], "undone")
         dist, _ = svc.lab_dist()
@@ -371,6 +375,326 @@ class ExpandTests(unittest.TestCase):
                 plan = self.run_expand(dry_run=True)["plan"]
         self.assertNotIn("Gil Group", self.new_names(plan))
         self.assertNotIn("Ned Nearby", self.new_names(plan))
+
+    FP = "Faraway Polytechnic"
+    LAB_NAMESAKE = {"A101": author("A101", "Vic Visitor", inst=FP), "A102": author("A102", "Bo Bystander", inst=FP),
+                    "A103": author("A103", "Gus Gradschool", inst=FP), "A104": author("A104", "Hal Hallmate", inst=FP),
+                    "A105": author("A105", "Ivy Ivory", inst=FP), "A106": author("A106", "Jo Jumble", inst=FP),
+                    "A107": author("A107", "Wes Westward", inst=FP), "A108": author("A108", "Kai Consortium"),
+                    "A109": author("A109", "Lu Large")}
+
+    def test_a_lab_members_papers_that_connect_to_nothing_known_are_left_out(self):
+        # Pat's record also holds a namesake's two papers from another place, with people no one in the lab knows.
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            fp = self.FP
+            extra = [work("W100", 2012, "Namesake paper, first", [("A1", fp), ("A101", fp)]),
+                     work("W101", 2013, "Namesake paper, second", [("A1", fp), ("A101", fp), ("A102", fp)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        names = self.new_names(plan)
+        self.assertNotIn("Vic Visitor", names)
+        self.assertNotIn("Bo Bystander", names)
+        self.assertIn("Nia Newcoauthor", names)             # Pat's own paper at Lakeside still counts
+        self.assertEqual((plan["coverage"]["pi"]["works"], plan["coverage"]["pi"]["unanchored"]), (2, 2))
+
+    def test_papers_on_a_lab_members_orcid_record_count_and_vouch_for_that_institution(self):
+        # Pat's doctoral papers at Faraway: two are on Pat's ORCID record, a third is not but lists the same place.
+        Service(Workspace(self.ws_path)).add_source(
+            "pi", {"url": "https://orcid.org/0000-0000-0000-0001", "note": "ORCID record"}, "test")
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            fp = self.FP
+            extra = [work("W102", 2014, "Doctoral paper one", [("A1", fp), ("A103", fp)], doi="10.0000/phd1"),
+                     work("W103", 2015, "Doctoral paper two", [("A1", fp), ("A103", fp)], doi="10.0000/phd2"),
+                     work("W104", 2015, "Doctoral paper three", [("A1", fp), ("A104", fp)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra), \
+                    mock.patch.dict(ORCID_WORKS, {"0000-0000-0000-0001": [("10.0000/phd1", 2014), ("10.0000/phd2", 2015)]}):
+                plan = self.run_expand(dry_run=True)["plan"]
+        names = self.new_names(plan)
+        self.assertIn("Gus Gradschool", names)
+        self.assertIn("Hal Hallmate", names)
+        self.assertNotIn("unanchored", plan["coverage"]["pi"])
+
+    def test_a_lab_members_paper_counts_when_it_names_someone_the_lab_recorded(self):
+        # Morgan is Pat's recorded mentor, and Chris's coauthor record with Pat came from another public source. Rae's
+        # only tie to the lab is a coauthor record an expand run wrote from Pat's OpenAlex works.
+        svc = Service(Workspace(self.ws_path))
+        rae = svc.create_contact({"fields": {"name": "Rae Recorded", "institution": LU}}, self.EXPAND)["id"]
+        svc.add_source(rae, {"url": "https://openalex.org/A115", "note": "OpenAlex author record"}, self.EXPAND)
+        svc.create_tie({"fields": {"from": "pi", "to": rae, "type": "coauthor", "provenance": "public",
+                                   "sourceTitle": "An earlier paper (2019)", "sourceUrl": "https://openalex.org/W199",
+                                   "evidence": "Named together on 1 work indexed by OpenAlex"}}, self.EXPAND)
+        new = {"A115": author("A115", "Rae Recorded"), "A116": author("A116", "Kit Curated", inst=self.FP)}
+        with mock.patch.dict(AUTHORS, {**self.LAB_NAMESAKE, **new}):
+            fp = self.FP
+            extra = [work("W105", 2014, "Pat and Morgan at Faraway", [("A1", fp), ("A5", NI), ("A105", fp)]),
+                     work("W106", 2014, "Pat and Rae elsewhere", [("A1", "Distant University"), ("A115", LU),
+                                                                     ("A106", fp)]),
+                     work("W116", 2014, "Pat and Chris at Faraway", [("A1", fp), ("A3", LU), ("A116", fp)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        names = self.new_names(plan)
+        self.assertIn("Ivy Ivory", names)
+        self.assertIn("Kit Curated", names)
+        self.assertNotIn("Jo Jumble", names)
+
+    EXPAND = "expand (OpenAlex)"            # who writes the records an expand run adds
+
+    def add_vic(self, svc, member="pi"):
+        """Vic, whom an earlier run added as a lab member's coauthor from a namesake's paper on the member's record,
+        and the works: that paper, and Vic's two papers with Wes."""
+        vic = svc.create_contact({"fields": {"name": "Vic Visitor", "institution": self.FP,
+                                             "tags": ["openalex-expand", "expand-first-degree"]}}, self.EXPAND)["id"]
+        svc.add_source(vic, {"url": "https://openalex.org/A101", "note": "OpenAlex author record"}, self.EXPAND)
+        svc.create_tie({"fields": {"from": member, "to": vic, "type": "coauthor", "provenance": "public",
+                                   "sourceTitle": "Namesake paper, first (2012)", "sourceUrl": "https://openalex.org/W100",
+                                   "evidence": "Named together on 1 work"}}, self.EXPAND)
+        fp = self.FP
+        return vic, [work("W100", 2012, "Namesake paper, first", [("A1", fp), ("A101", fp)]),
+                     work("W107", 2024, "Vic and Wes, first", [("A101", fp), ("A107", fp)]),
+                     work("W108", 2023, "Vic and Wes, second", [("A101", fp), ("A107", fp)])]
+
+    def test_people_tied_to_the_lab_only_by_a_lab_members_left_out_papers_are_not_collected(self):
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+                cov = plan["coverage"][vic]
+                self.assertEqual((cov["status"], cov["through"]), ("tie-unanchored", ["pi"]))
+                self.assertNotIn("Wes Westward", self.new_names(plan))
+                self.assertEqual(plan["firstDegree"], sum(1 for v in plan["coverage"].values() if v["degree"] == 1))
+                # Once someone in the lab records meeting Vic, the paper is Pat's and Vic's coauthors are collected.
+                svc.create_tie({"fields": {"from": "pi", "to": vic, "type": "met", "evidence": "Met at a meeting"}},
+                               "Pat Investigator")
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(plan["coverage"][vic]["status"], "collected")
+        self.assertIn("Wes Westward", self.new_names(plan))
+
+    def test_a_namesakes_coauthor_left_out_for_one_member_does_not_vouch_for_another(self):
+        # Dana's record and Pat's both hold a namesake's papers with Vic; an earlier run tied Vic to Dana from hers.
+        svc = Service(Workspace(self.ws_path))
+        svc.add_source("pd", {"url": "https://openalex.org/A110", "note": "OpenAlex author record"}, "test")
+        with mock.patch.dict(AUTHORS, {**self.LAB_NAMESAKE, "A110": author("A110", "Dana Postdoc", inst=self.FP)}):
+            vic, extra = self.add_vic(svc, member="pd")
+            fp = self.FP
+            extra += [work("W111", 2013, "Dana's namesake with Vic", [("A110", fp), ("A101", fp)]),
+                      work("W101", 2013, "Namesake paper, second", [("A1", fp), ("A101", fp), ("A102", fp)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        cov = plan["coverage"][vic]
+        self.assertEqual((cov["status"], cov["through"]), ("tie-unanchored", ["pd", "pi"]))
+        names = self.new_names(plan)
+        self.assertNotIn("Bo Bystander", names)
+        self.assertNotIn("Wes Westward", names)
+        self.assertNotIn(("pi", vic), {(e["from"], e["to"]) for e in plan["notebook"]["edges"]})
+
+    def test_an_orcid_id_only_on_a_lab_members_openalex_record_does_not_count(self):
+        # The OpenAlex record the library matched to Pat shows a namesake's ORCID iD, which lists the namesake's papers.
+        self.write_library({"pi": {"status": "linked", "id": "A1", "ids": ["A1"], "basis": "a match",
+                                   "summary": {"orcid": "0000-0000-0000-0028"}}})
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            fp = self.FP
+            extra = [work("W100", 2012, "Namesake paper, first", [("A1", fp), ("A101", fp)], doi="10.0000/ns1"),
+                     work("W101", 2013, "Namesake paper, second", [("A1", fp), ("A101", fp), ("A102", fp)],
+                          doi="10.0000/ns2")]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra), \
+                    mock.patch.dict(ORCID_WORKS, {"0000-0000-0000-0028": [("10.0000/ns1", 2012), ("10.0000/ns2", 2013)]}):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertNotIn("Bo Bystander", self.new_names(plan))
+        self.assertTrue(any("0000-0000-0000-0028" in c and "not on their record" in c for c in plan["report"]["checks"]))
+
+    def test_a_mistyped_orcid_id_on_a_lab_members_record_is_reported_and_not_read(self):
+        Service(Workspace(self.ws_path)).add_source(
+            "pi", {"url": "https://orcid.org/0000-0000-0000-0002", "note": "ORCID record"}, "test")
+        plan = self.run_expand(dry_run=True)["plan"]
+        self.assertTrue(any("0000-0000-0000-0002" in e and "not a valid iD" in e for e in plan["report"]["errors"]))
+        self.assertFalse(any("0000-0000-0000-0002/works" in u for u in self.fake.calls))
+
+    def test_an_orcid_record_that_cannot_be_read_confirms_nothing(self):
+        svc = Service(Workspace(self.ws_path))
+        svc.add_source("pi", {"url": "https://orcid.org/0000-0000-0000-0001", "note": "ORCID record"}, "test")
+        self.fake.fails = lambda url: "pub.orcid.org" in url and "0000-0000-0000-0001" in url
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(plan["coverage"][vic]["status"], "tie-unanchored")
+        self.assertNotIn("Wes Westward", self.new_names(plan))
+        self.assertTrue(any("Pat Investigator: ORCID record 0000-0000-0000-0001 could not be read" in e
+                            for e in plan["report"]["errors"]))
+
+    def test_a_lab_members_orcid_record_is_read_again_each_run(self):
+        Service(Workspace(self.ws_path)).add_source(
+            "pi", {"url": "https://orcid.org/0000-0000-0000-0001", "note": "ORCID record"}, "test")
+        cache = os.path.join(self.tmp, "cache")
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            fp = self.FP
+            extra = [work("W102", 2014, "Doctoral paper one", [("A1", fp), ("A103", fp)], doi="10.0000/phd1"),
+                     work("W103", 2015, "Doctoral paper two", [("A1", fp), ("A103", fp)], doi="10.0000/phd2")]
+            plans = []
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                for listed in ([], [("10.0000/phd1", 2014), ("10.0000/phd2", 2015)]):      # Pat adds them to ORCID
+                    with mock.patch.dict(ORCID_WORKS, {"0000-0000-0000-0001": listed}):
+                        client = Client(cache_dir=cache, transport=self.fake, budget_usd=0.08)
+                        plans.append(expand(self.ws_path, client=client, dry_run=True, log=lambda m: None)["plan"])
+        self.assertNotIn("Gus Gradschool", self.new_names(plans[0]))
+        self.assertIn("Gus Gradschool", self.new_names(plans[1]))
+
+    def test_a_coauthor_record_with_the_lab_that_no_paper_confirms_is_not_collected(self):
+        # Kai's coauthor record with Pat was written from a paper with more than 30 authors; Lou's was entered by a
+        # person, as a public record.
+        svc = Service(Workspace(self.ws_path))
+        ids = {}
+        for name, aid, actor in (("Kai Consortium", "A108", self.EXPAND), ("Lou Entered", "A112", "Pat Investigator")):
+            ids[name] = svc.create_contact({"fields": {"name": name, "institution": LU}}, actor)["id"]
+            svc.add_source(ids[name], {"url": f"https://openalex.org/{aid}", "note": "OpenAlex author record"}, actor)
+            svc.create_tie({"fields": {"from": "pi", "to": ids[name], "type": "coauthor", "provenance": "public",
+                                       "sourceTitle": "A consortium paper (2020)", "sourceUrl": "https://doi.org/10.0000/big",
+                                       "evidence": "Named together on 1 work"}}, actor)
+        new = {"A112": author("A112", "Lou Entered"), "A113": author("A113", "Max Moreland")}
+        with mock.patch.dict(AUTHORS, {**self.LAB_NAMESAKE, **new}):
+            extra = [work("W109", 2024, "Kai and Lu, first", [("A108", LU), ("A109", LU)]),
+                     work("W110", 2023, "Kai and Lu, second", [("A108", LU), ("A109", LU)]),
+                     work("W112", 2024, "Lou and Max, first", [("A112", LU), ("A113", LU)]),
+                     work("W113", 2023, "Lou and Max, second", [("A112", LU), ("A113", LU)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        names = self.new_names(plan)
+        self.assertEqual(plan["coverage"][ids["Kai Consortium"]]["status"], "tie-unconfirmed")
+        self.assertNotIn("Lu Large", names)
+        self.assertEqual(plan["coverage"][ids["Lou Entered"]]["status"], "collected")
+        self.assertIn("Max Moreland", names)
+
+    def test_people_in_the_network_only_through_someone_no_longer_collected_are_listed(self):
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            wes = svc.create_contact({"fields": {"name": "Wes Westward", "institution": self.FP,
+                                                 "tags": ["openalex-expand", "expand-second-degree"]}}, self.EXPAND)["id"]
+            svc.create_tie({"fields": {"from": vic, "to": wes, "type": "coauthor", "provenance": "public",
+                                       "sourceTitle": "Vic and Wes, first (2024)", "sourceUrl": "https://openalex.org/W107",
+                                       "evidence": "Named together on 2 works"}}, self.EXPAND)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                res = self.run_expand()
+        self.assertEqual(res["plan"]["coverage"][vic]["onlyThrough"], [wes])
+        with open(res["digestPath"], encoding="utf-8") as f:
+            self.assertIn("in the network only through them: Wes Westward", f.read())
+        c = Service(Workspace(self.ws_path)).person(vic, {"maxDegree": "all", "doctorate": "any",
+                                                         "identified": "0"})["collection"]
+        self.assertEqual((c["status"], c["through"], c["onlyThrough"]), ("tie-unanchored", ["Pat Investigator"], 1))
+
+    def test_a_run_for_some_people_records_no_one_else(self):
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True, only=["Chris Coauthor"])["plan"]
+        self.assertNotIn(vic, plan["coverage"])
+        self.assertEqual(plan["coverage"]["c1"]["status"], "collected")
+
+    def test_a_run_for_some_people_still_keeps_flagged_people_from_vouching(self):
+        # Chris's record also holds a namesake's two papers with Vic, whom a full run flags, and Tam.
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, {**self.LAB_NAMESAKE, "A117": author("A117", "Tam Tagalong", inst=self.FP)}):
+            vic, extra = self.add_vic(svc)
+            fp = self.FP
+            extra += [work(wid, year, f"Chris's namesake with Vic and Tam ({year})", [("A3", fp), ("A101", fp), ("A117", fp)])
+                      for wid, year in (("W117", 2024), ("W118", 2023))]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plans = [self.run_expand(dry_run=True)["plan"],
+                         self.run_expand(dry_run=True, only=["Chris Coauthor"])["plan"]]
+        for plan in plans:
+            self.assertNotIn("Tam Tagalong", self.new_names(plan))
+            self.assertEqual(plan["coverage"]["c1"]["works"], 3)
+
+    def held_vic_plan(self, inst):
+        """A plan in which Pat's own paper at Lakeside also names a Vic Visitor, at `inst`, under another OpenAlex
+        record (A150)."""
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, {**self.LAB_NAMESAKE, "A150": author("A150", "Vic Visitor", inst=inst)}):
+            vic, extra = self.add_vic(svc)
+            extra.append(work("W150", 2024, "Pat's own paper with a Vic Visitor", [("A1", LU), ("A150", inst)]))
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                return vic, self.run_expand(dry_run=True)["plan"]
+
+    def test_a_held_namesake_of_a_flagged_person_does_not_confirm_their_tie(self):
+        vic, plan = self.held_vic_plan(LU)                 # Vic's own record says Faraway
+        self.assertEqual(plan["coverage"][vic]["status"], "tie-unanchored")
+        self.assertNotIn("Wes Westward", self.new_names(plan))
+        self.assertTrue(any("https://openalex.org/A150" in c for c in plan["report"]["checks"]))
+
+    def test_a_held_record_at_the_persons_own_institution_confirms_their_tie(self):
+        vic, plan = self.held_vic_plan(self.FP)
+        self.assertEqual(plan["coverage"][vic]["status"], "collected")
+        self.assertIn("Wes Westward", self.new_names(plan))
+
+    def test_people_further_out_through_someone_no_longer_collected_are_listed_too(self):
+        # Wes and Xan came in through Vic, and an earlier run also recorded them as coauthors of each other.
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            ids = [svc.create_contact({"fields": {"name": name, "institution": self.FP,
+                                                  "tags": ["openalex-expand", "expand-second-degree"]}}, self.EXPAND)["id"]
+                   for name in ("Wes Westward", "Xan Xavier")]
+            for a, b in ((vic, ids[0]), (vic, ids[1]), (ids[0], ids[1])):
+                svc.create_tie({"fields": {"from": a, "to": b, "type": "coauthor", "provenance": "public",
+                                           "sourceTitle": "A paper (2024)", "sourceUrl": "https://openalex.org/W107",
+                                           "evidence": "Named together on 2 works indexed by OpenAlex"}}, self.EXPAND)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(plan["coverage"][vic]["onlyThrough"], sorted(ids))
+
+    def test_people_tied_to_a_lab_member_whose_works_cannot_be_read_keep_their_earlier_note(self):
+        svc = Service(Workspace(self.ws_path))
+        self.fake.fails = lambda url: "authorships.author.id:A1,authors_count" in url
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertNotIn(vic, plan["coverage"])
+        self.assertNotIn("pi", plan["coverage"])            # Pat's own earlier note stays too
+        self.assertNotIn("Wes Westward", self.new_names(plan))
+        self.assertTrue(any("could not be read" in e for e in plan["report"]["errors"]))
+        self.assertEqual(plan["firstDegree"], sum(1 for v in plan["coverage"].values() if v["degree"] == 1))
+
+    def test_a_shared_nih_award_joined_by_name_alone_confirms_nothing(self):
+        # Onboarding joined one of Pat's NIH co-investigators to Vic by name; only the co-investigator's NIH profile ID
+        # on Vic's record shows they are one person.
+        svc = Service(Workspace(self.ws_path))
+        with mock.patch.dict(AUTHORS, self.LAB_NAMESAKE):
+            vic, extra = self.add_vic(svc)
+            svc.create_tie({"fields": {"from": "pi", "to": vic, "type": "grant", "provenance": "public",
+                                       "sourceTitle": "NIH RePORTER award record",
+                                       "sourceUrl": "https://reporter.nih.gov/project-details/1",
+                                       "evidence": "Both are named as principal investigators on NIH project R01XX000002"}},
+                           "onboarding")
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                before = self.run_expand(dry_run=True)["plan"]
+                svc.add_source(vic, {"url": "https://reporter.nih.gov/project-details/1",
+                                     "note": "Named as PI on NIH project R01XX000002; NIH RePORTER PI profile ID 1"}, "test")
+                after = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(before["coverage"][vic]["status"], "tie-unanchored")
+        self.assertEqual(after["coverage"][vic]["status"], "collected")
+
+    def test_institutions_match_by_name_or_an_affiliated_unit(self):
+        from labnetwork.expand import _inst_match
+        for recorded, named in (("Lakeside University", "Lakeside University Medical Center"),
+                                ("Department of Psychology, Lakeside University", "Lakeside University"),
+                                ("Elsewhere College; Lakeside University", "Lakeside University"),
+                                ("Lakeside University", "Elsewhere College; Lakeside University"),
+                                ("The Ohio State University", "Ohio State University")):
+            self.assertTrue(_inst_match(recorded, named), (recorded, named))
+        for recorded, named in (("University of California", "University of California, Los Angeles"),
+                                ("University of Pennsylvania", "Indiana University of Pennsylvania"),
+                                ("Lakeside University", "Lakeside University Press"), ("", "Lakeside University"),
+                                ("Northfield Institute, Lakeside", "Lakeside Medical Center")):
+            self.assertFalse(_inst_match(recorded, named), (recorded, named))
+
+    def test_only_a_full_name_or_orcid_id_marks_the_person_on_a_paper_listed_on_orcid(self):
+        from labnetwork.expand import _selves
+        with mock.patch.dict(AUTHORS, {"A114": author("A114", "C. Coauthor")}):
+            w = work("W114", 2024, "Listed on ORCID", [("A114", LU), ("A3", LU)])
+        self.assertEqual(_selves(w, "Chris Coauthor", ""), {"A3"})
 
     def test_people_onboarding_added_do_not_vouch_for_papers(self):
         svc = Service(Workspace(self.ws_path))
