@@ -37,11 +37,17 @@ python3 labnetwork.py serve ~/LabNetwork/my-lab/workspace --open
 ## What the build reads
 
 - **Lab members' papers** from OpenAlex, since the year you choose (ten years back by default).
-- **Coauthors.** Up to 40 per member, keeping the most frequent. Each becomes a first-degree person, linked to the
-  member by one coauthor record that lists the shared works.
-- **Coauthors of coauthors**, unless you turn this off. Up to 5 per first-degree person, again the most frequent.
-  These are second-degree people. Their ties are marked "likely" rather than "confirmed", because both identities
-  come from OpenAlex's algorithm.
+- **Coauthors.** Up to 40 per member, keeping the most frequent, from papers with 30 or fewer authors. Each becomes a
+  first-degree person, linked to the member by one coauthor record that lists the shared works. You confirm each
+  member's OpenAlex record, not each paper on it, and OpenAlex sometimes files two researchers with the same name under
+  one record. So a member's paper counts only when it names another lab member, someone in the relationships you list,
+  or someone named on another member's papers that count; is on the ORCID record whose iD you gave for the member; or
+  lists the member at their institution or at an institution where two such papers list them. The `limitations` list
+  in `packet/source-manifest.json` says how many of each member's papers were left out, and `expand` checks them again
+  later against everything recorded by then.
+- **Coauthors of coauthors**, unless you turn this off. Up to 5 per first-degree person, again the most frequent, from
+  papers with 30 or fewer authors. These are second-degree people. Their ties are marked "likely" rather than
+  "confirmed", because both identities come from OpenAlex's algorithm.
 - **ORCID records** for people who list an ORCID iD. A completed doctorate on the record is stored as confirmed, with
   the record as its source. A current employment entry fills in an empty position.
 - **NIH awards** for members with a RePORTER PI profile ID. Other principal investigators named on the same award are

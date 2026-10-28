@@ -94,6 +94,15 @@ For each person within the chosen degree of the lab (`--scope 1` or `--scope 2`)
 - **New papers** since the last refresh (with 45 days of overlap, because indexing lags) are added to their profile.
 - **New coauthors of lab members** are added as new people, each with a coauthor record citing the paper.
 - **New ties between people already in the notebook** are added when they appear on a new paper together.
+- **Only papers with 30 or fewer authors** add people or ties; a larger paper still goes on the profile. A new person,
+  or a tie with a lab member, comes only from a paper that counts for that member by the rule `expand` uses (see
+  [Fill in the first and second degree](../README.md#fill-in-the-first-and-second-degree)), because OpenAlex sometimes
+  files two researchers with the same name under one record. To apply the rule, each refresh reads all of the lab
+  members' OpenAlex works and the ORCID records whose iDs are on their records. The digest lists lab members' new
+  papers that added no coauthors, and any ORCID iD for you to check. A later refresh does not read those papers again;
+  once one counts, `expand` adds its coauthors. If a record the check needs cannot be read (a lab member's OpenAlex
+  works or ORCID record, or the research library), the refresh records none of the papers it could not check and keeps
+  the date of the last refresh, so the next refresh reads them again.
 - **A changed affiliation** is not applied. If OpenAlex lists a different institution, it becomes an open conflict on
   the Data page, and your recorded value stays until you choose.
 - **New NIH awards** for lab members with a RePORTER profile ID are added to their profiles.

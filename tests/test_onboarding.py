@@ -33,13 +33,17 @@ def author(aid, name, inst, orcid="", topics=("Behavioral genetics",)):
             "topics": [{"display_name": t} for t in topics]}
 
 
-def work(wid, title, year, authors, date=None):
+def work(wid, title, year, authors, date=None, insts=None):
+    """`insts` gives an author's institution on this work when it is not their latest one."""
+    def place(a):
+        name = (insts or {}).get(a) or AUTHORS[a]["last_known_institutions"][0]["display_name"]
+        return {"display_name": name, "id": "https://openalex.org/I" + name.replace(" ", "")}
     return {"id": f"https://openalex.org/{wid}", "doi": f"https://doi.org/10.0000/{wid.lower()}", "title": title,
             "publication_year": year, "publication_date": date or f"{year}-06-01", "type": "article",
             "primary_location": {"source": {"display_name": "Journal of Examples"}},
             "authorships": [{"author": {"id": f"https://openalex.org/{a}", "display_name": AUTHORS[a]["display_name"],
                                         "orcid": AUTHORS[a]["orcid"]},
-                             "institutions": [{"display_name": AUTHORS[a]["last_known_institutions"][0]["display_name"]}]}
+                             "institutions": [place(a)]}
                             for a in authors]}
 
 
@@ -67,6 +71,17 @@ WORKS = {
     "A5": [work("W3", "Cannabis and cognition", YEAR - 3, ["A1", "A5"])],
 }
 
+FP, RA = "Faraway Polytechnic", "Remote Academy"
+# Made-up people for the identity rules: a namesake's coauthors on papers filed under Pat's record (from Remote
+# Academy), and Pat's own coauthors from Faraway Polytechnic, among them Pat's reported mentor and collaborator.
+OTHERS = {a["id"].rsplit("/", 1)[1]: a for a in [
+    author("A20", "Ottilie Quarrington", RA), author("A21", "Thaddeus Quorn", RA),
+    author("A22", "Isolde Brackenridge", FP), author("A23", "Wendeline Ashcombe", FP),
+    author("A24", "Morgan Elder", FP), author("A25", "Zephyrine Mallowby", FP),
+    author("A26", "Peregrine Oakhurst", RA), author("A27", "Seraphina Wolstencroft", RA),
+    author("A28", "L. Thistlewood", RA)]}
+PANEL = {f"A{300 + i}": author(f"A{300 + i}", f"Panel Author {i}", "Lakeside University") for i in range(1, 31)}
+
 ORCID_EDU = {
     "0000-0000-0000-0001": [("Ph.D. in Psychology", "Big State University", YEAR - 12)],
     "0000-0000-0000-0003": [("BA", "Small College", YEAR - 20)],
@@ -93,10 +108,14 @@ class FakeAPI:
     def __init__(self):
         self.works = copy.deepcopy(WORKS)
         self.authors = copy.deepcopy(AUTHORS)
+        self.orcid_works = {}       # ORCID iD -> [(DOI, year)] listed on the record
+        self.fails = lambda url: False      # a request it refuses, as a server error would
         self.calls = []
 
     def __call__(self, method, url, body, headers):
         self.calls.append(url)
+        if self.fails(url):
+            raise _http_404(url)
         u = urlsplit(url)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.netloc == "api.openalex.org":
@@ -119,15 +138,21 @@ class FakeAPI:
                 # The build filters on author.id; the research library on authorships.author.id (several with |).
                 parts = dict(p.split(":", 1) for p in q["filter"].split(","))
                 since = parts.get("from_publication_date", "1900-01-01")
+                limit = int(parts["authors_count"].lstrip("<")) if "authors_count" in parts else 10 ** 6
                 ws, seen = [], set()
                 for aid in (parts.get("author.id") or parts.get("authorships.author.id")).split("|"):
                     for w in self.works.get(aid, []):
-                        if w["publication_date"] >= since and w["id"] not in seen:
+                        if w["publication_date"] >= since and w["id"] not in seen and len(w["authorships"]) < limit:
                             seen.add(w["id"])
                             ws.append(w)
                 return {"results": ws, "meta": {"next_cursor": None}}
         if u.netloc == "pub.orcid.org":
             o, kind = u.path.split("/")[2:4]
+            if kind == "works":
+                return {"group": [{"external-ids": {"external-id": [
+                    {"external-id-type": "doi", "external-id-value": d, "external-id-normalized": {"value": d}}]},
+                    "work-summary": [{"publication-date": {"year": {"value": str(y)}}}]}
+                    for d, y in self.orcid_works.get(o, [])]}
             if kind == "educations":
                 return {"affiliation-group": [{"summaries": [{"education-summary": {
                     "role-title": t, "organization": {"name": org}, "end-date": {"year": {"value": str(y)}}}}]}
@@ -265,6 +290,189 @@ class OnboardingTests(unittest.TestCase):
         svc2 = Service(Workspace(ws.path))
         self.assertEqual(len(svc2.conflicts({})["conflicts"]), 1)                   # no duplicate conflict
         self.assertLessEqual(len(svc2.nb.events) - events, 1)                       # only the batch record
+
+    def add_people(self, people):
+        """Made-up OpenAlex authors for one test: works name them, and the fake API returns their records."""
+        patch = mock.patch.dict(AUTHORS, people)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.api.authors.update(copy.deepcopy(people))
+
+    def packet(self, out):
+        with open(os.path.join(out, "notebook.json"), encoding="utf-8") as f:
+            nb = json.load(f)
+        return nb, {c["name"] for c in nb["contacts"]}
+
+    def test_build_adds_coauthors_only_from_a_members_works_that_count(self):
+        # Pat's OpenAlex record also holds a namesake's two papers from Remote Academy, with people no one in the lab
+        # knows. Pat's papers from Faraway Polytechnic count: one names Pat's reported mentor, one is on the ORCID
+        # record whose iD is in lab.json, and a third lists Pat where those two do. A paper from Remote Academy counts
+        # as well, because it names the reported collaborator by the OpenAlex record lab.json gives for them.
+        self.add_people(OTHERS)
+        self.api.works["A1"] += [
+            work("W20", "A namesake's first paper", YEAR - 4, ["A1", "A20", "A21"], insts={"A1": RA}),
+            work("W21", "A namesake's second paper", YEAR - 5, ["A1", "A20"], insts={"A1": RA}),
+            work("W22", "Pat and their mentor", YEAR - 6, ["A1", "A24", "A22"], insts={"A1": FP}),
+            work("W23", "On Pat's ORCID record", YEAR - 6, ["A1", "A23"], insts={"A1": FP}),
+            work("W25", "Another paper from Faraway", YEAR - 7, ["A1", "A25"], insts={"A1": FP}),
+            work("W26", "Pat and their collaborator", YEAR - 3, ["A1", "A28"], insts={"A1": RA})]
+        self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w23", YEAR - 6)]
+        lab = self.lab()
+        lab["relationships"].append({"member": "pat-rivera", "name": "Ludovica Thistlewood", "type": "collaborator",
+                                     "openalexId": "A28", "evidence": "Ran a study together"})
+        resolve_members(lab, self.client, choose=lambda m, c: "A2")
+        out = os.path.join(self.tmp, "packet")
+        build(lab, self.client, out, log=lambda m: None)
+        nb, people = self.packet(out)
+        self.assertFalse({"Ottilie Quarrington", "Thaddeus Quorn"} & people)
+        self.assertTrue({"Isolde Brackenridge", "Wendeline Ashcombe", "Zephyrine Mallowby", "L. Thistlewood",
+                         "Dana Moreau"} <= people, people)
+        self.assertNotIn("Ludovica Thistlewood", people)        # the collaborator record joined their OpenAlex record
+        with open(os.path.join(out, "source-manifest.json"), encoding="utf-8") as f:
+            limits = json.load(f)["limitations"]
+        note = next((x for x in limits if x.startswith("Lab members' OpenAlex works since")), "")
+        self.assertIn("Pat Rivera, 2 of 9.", note)
+
+    def test_build_reads_coauthors_only_from_papers_with_30_or_fewer_authors(self):
+        # Pat and Chris each have a paper with 31 authors; Eli is Pat's coauthor and on Chris's paper too.
+        self.add_people(PANEL)
+        panel = list(PANEL)
+        self.api.works["A1"].append(work("W30", "Pat's consortium paper", YEAR - 1, ["A1"] + panel))
+        self.api.works["A3"].append(work("W31", "Chris's consortium paper", YEAR - 1, ["A3", "A5"] + panel[:29]))
+        _, out, _ = self.build()
+        nb, people = self.packet(out)
+        self.assertFalse({a["display_name"] for a in PANEL.values()} & people)
+        names = {c["id"]: c["name"] for c in nb["contacts"]}
+        pairs = {frozenset((names[e["from"]], names[e["to"]])) for e in nb["edges"] if e["type"] == "coauthor"}
+        self.assertNotIn(frozenset(("Chris Lindqvist", "Eli Watanabe")), pairs)
+
+    def built_workspace(self):
+        _, out, _ = self.build()
+        return Workspace.create(os.path.join(self.tmp, "ws"), out, lab_name="Rivera Lab")
+
+    def test_refresh_adds_coauthors_only_from_a_members_new_works_that_count(self):
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        today = dt.date.today().isoformat()
+        # Three new papers on Pat's record. From Remote Academy: a namesake's, which also names Farah (in the network
+        # through Chris), and one that names Sam, another lab member. From Faraway Polytechnic: one on Pat's ORCID
+        # record.
+        w41 = work("W41", "Pat and Sam at Remote Academy", YEAR, ["A1", "A2", "A27"], date=today,
+                   insts={"A1": RA, "A2": RA})
+        self.api.works["A1"][:0] = [
+            work("W40", "A namesake's new paper", YEAR, ["A1", "A26", "A6"], date=today, insts={"A1": RA}), w41,
+            work("W46", "Pat's new paper on their ORCID record", YEAR, ["A1", "A25"], date=today, insts={"A1": FP})]
+        self.api.works["A2"].insert(0, copy.deepcopy(w41))
+        self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w46", YEAR)]
+        res = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)
+        d = res["digest"]
+        self.assertEqual(sorted(p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"),
+                         ["A namesake's new paper", "Pat and Sam at Remote Academy",
+                          "Pat's new paper on their ORCID record"])                         # all on the profile
+        self.assertEqual(sorted(p["name"] for p in d["newPeople"]), ["Seraphina Wolstencroft", "Zephyrine Mallowby"])
+        self.assertEqual([x["title"] for x in d["leftOut"]], ["A namesake's new paper"])
+        svc = Service(Workspace(ws.path))
+        ids = {c["name"]: pid for pid, c in svc.nb.active("contacts")}
+        self.assertNotIn("Peregrine Oakhurst", ids)
+        pairs = {frozenset((e["from"], e["to"])) for _, e in svc.nb.active("edges") if e["type"] == "coauthor"}
+        self.assertNotIn(frozenset((ids["Pat Rivera"], ids["Farah Nadeem"])), pairs)
+        with open(res["digestPath"], encoding="utf-8") as f:
+            self.assertIn("## Lab members' new papers that added no coauthors (1)", f.read())
+
+    def test_refresh_adds_no_tie_with_a_lab_member_from_a_work_that_does_not_count_for_them(self):
+        # At scope 2 a refresh also reads Farah's new papers, and a namesake's paper filed under Pat's record names her.
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        w40 = work("W40", "A namesake's new paper", YEAR, ["A1", "A26", "A6"], date=dt.date.today().isoformat(),
+                   insts={"A1": RA})
+        for aid in ("A1", "A6"):                # OpenAlex lists a work under each of its authors
+            self.api.works.setdefault(aid, []).insert(0, copy.deepcopy(w40))
+        d = refresh(ws.path, scope=2, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(sorted(p["name"] for p in d["papers"]), ["Farah Nadeem", "Pat Rivera"])
+        self.assertEqual(d["newTies"], [])
+        self.assertEqual(d["newPeople"], [])
+
+    def test_refresh_adds_no_coauthors_from_papers_with_more_than_30_authors(self):
+        ws = self.built_workspace()
+        self.add_people(PANEL)
+        panel, today = list(PANEL), dt.date.today().isoformat()
+        self.api.works["A1"].insert(0, work("W42", "Pat's new consortium paper", YEAR, ["A1"] + panel, date=today))
+        self.api.works["A3"].insert(0, work("W43", "Chris's new consortium paper", YEAR, ["A3", "A5"] + panel[:29],
+                                            date=today))
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(sorted(p["title"] for p in d["papers"]),
+                         ["Chris's new consortium paper", "Pat's new consortium paper"])
+        self.assertEqual(d["newPeople"], [])
+        self.assertEqual(d["newTies"], [])          # not even between Chris and Eli, who are both in the network
+        self.assertEqual(d["leftOut"], [])          # left out for their size, not as a namesake's
+
+    def last_refresh(self, ws):
+        return (Workspace(ws.path).config.get("settings") or {}).get("lastRefresh")
+
+    def test_a_refresh_that_cannot_check_a_members_works_reads_their_papers_next_time(self):
+        # The last refresh was 30 days ago, and OpenAlex listed Pat's new paper late: it is dated 60 days ago, so only
+        # a refresh that reads from 45 days before the last one finds it.
+        ws = self.built_workspace()
+        today = dt.date.today()
+        ws.config["settings"]["lastRefresh"] = (today - dt.timedelta(days=30)).isoformat()
+        ws.save_config()
+        late = today - dt.timedelta(days=60)
+        self.api.works["A1"].insert(0, work("W9", "New sleep paper", late.year, ["A1", "A8", "A3"],
+                                            date=late.isoformat()))
+        self.api.fails = lambda url: "authorships.author.id:A1," in url
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p for p in d["papers"] if p["name"] == "Pat Rivera"], [])
+        self.assertEqual((d["newPeople"], d["leftOut"]), ([], []))
+        self.assertTrue(any(e.startswith("The new papers of Pat Rivera were not read") for e in d["errors"]),
+                        d["errors"])
+        self.assertEqual(self.last_refresh(ws), (today - dt.timedelta(days=30)).isoformat())     # kept
+        self.api.fails = lambda url: False
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"], ["New sleep paper"])
+        self.assertEqual([p["name"] for p in d["newPeople"]], ["Hana Brooks"])
+        self.assertEqual(self.last_refresh(ws), today.isoformat())
+
+    def test_a_paper_checked_without_a_record_it_needs_is_held_back(self):
+        # Pat's ORCID record cannot be read, so a new paper that counts only for being listed there waits; Pat's new
+        # paper with Sam counts without it.
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        today = dt.date.today().isoformat()
+        w41 = work("W41", "Pat and Sam at Remote Academy", YEAR, ["A1", "A2", "A27"], date=today,
+                   insts={"A1": RA, "A2": RA})
+        self.api.works["A1"][:0] = [
+            w41, work("W46", "Pat's new paper on their ORCID record", YEAR, ["A1", "A25"], date=today,
+                      insts={"A1": FP})]
+        self.api.works["A2"].insert(0, copy.deepcopy(w41))
+        self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w46", YEAR)]
+        self.api.fails = lambda url: "pub.orcid.org" in url and url.endswith("/works")
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"],
+                         ["Pat and Sam at Remote Academy"])
+        self.assertEqual(([p["name"] for p in d["newPeople"]], d["leftOut"]), (["Seraphina Wolstencroft"], []))
+        self.assertTrue(any(e.startswith("1 new paper was not recorded") for e in d["errors"]), d["errors"])
+        self.assertIsNone(self.last_refresh(ws))
+        self.api.fails = lambda url: False
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"],
+                         ["Pat's new paper on their ORCID record"])
+        self.assertEqual([p["name"] for p in d["newPeople"]], ["Zephyrine Mallowby"])
+
+    def test_a_damaged_research_library_does_not_stop_a_refresh(self):
+        # Without the library a name could match the wrong record, so lab members' papers wait for a readable one.
+        ws = self.built_workspace()
+        path = os.path.join(ws.path, "library.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{")
+        today = dt.date.today().isoformat()
+        self.api.works["A1"].insert(0, work("W9", "New sleep paper", YEAR, ["A1", "A8", "A3"], date=today))
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(([p for p in d["papers"] if p["name"] == "Pat Rivera"], d["newPeople"]), ([], []))
+        self.assertTrue(any(e.startswith("The research library could not be read") for e in d["errors"]), d["errors"])
+        self.assertIsNone(self.last_refresh(ws))
+        os.remove(path)
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p["name"] for p in d["newPeople"]], ["Hana Brooks"])
 
     def test_schedule_plan_is_printed_not_installed(self):
         p = schedule.plan(os.path.join(self.tmp, "ws"), "week", 2)

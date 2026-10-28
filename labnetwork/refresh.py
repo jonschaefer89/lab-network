@@ -9,6 +9,12 @@ skipped and listed in the digest for a person to review.
 People are updated when their record carries an OpenAlex author link (and, for
 awards, an NIH RePORTER profile ID in their source notes). Packets built by
 `labnetwork onboard` have these; others can gain them through the app.
+
+Coauthors come from papers with 30 or fewer authors. A person confirmed each lab
+member's OpenAlex record, not each work on it, and OpenAlex sometimes files two
+researchers with the same name under one record, so a new person, or a coauthor
+record with a lab member, comes only from a work that counts for that member by
+the rule expand applies.
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ import json
 import os
 import re
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .connectors import openalex as oa
 from .connectors import reporter as rp
@@ -56,7 +62,9 @@ def _nih_profile(c: Dict[str, Any]) -> Optional[int]:
 
 
 def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[str] = None,
-                max_people: int = 600, log: Callable[[str], None] = print) -> Dict[str, Any]:
+                max_people: int = 600, log: Callable[[str], None] = print,
+                lib: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    from .expand import MAX_AUTHORS, lab_works_that_count       # expand imports this module
     nb = svc.nb
     dist, _ = svc.lab_dist()
     settings = svc.ws.config.get("settings") or {}
@@ -73,9 +81,29 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
     new_contacts: Dict[str, Dict[str, Any]] = {}
     new_edges: List[Dict[str, Any]] = []
     digest = {"since": since_date, "scope": scope, "papers": [], "newPeople": [], "newTies": [], "affiliation": [],
-              "grants": [], "checked": 0, "skippedNoLink": 0, "errors": []}
+              "grants": [], "leftOut": [], "checked": 0, "skippedNoLink": 0, "checks": [], "errors": []}
     existing_pairs = {(e["from"], e["to"], e["type"]) for _, e in nb.active("edges")}
     lab = set(nb.root_ids)
+    # Lab member -> their works that count, by OpenAlex ID. When a record the rule reads could not be read, fewer works
+    # count than should, so a new paper that does not count is held back instead of recorded (`complete` is False).
+    counted: Dict[str, Set[str]] = {}
+    complete = False
+    try:
+        if lib is None:
+            from .library import load
+            lib = load(svc.ws)
+    except (OSError, ValueError) as exc:        # without the library a name could match the wrong record: no check
+        digest["errors"].append(f"The research library could not be read ({exc}), so lab members' papers were not "
+                                "checked.")
+    else:
+        try:
+            kept, _, unread = lab_works_that_count(svc, client, digest["errors"], digest["checks"], lib)
+            counted = {pid: {w.get("id") for w in works} for pid, works in kept.items()}
+            complete = not unread
+        except HttpError as exc:
+            digest["errors"].append(f"Lab members' OpenAlex works could not be checked ({exc}).")
+    unchecked: List[str] = []           # lab members whose new papers were not read
+    held: Set[str] = set()              # new papers held back, by OpenAlex ID
     checked_ids = []
     for pid in people:
         c = nb.records["contacts"][pid]
@@ -84,6 +112,9 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             digest["skippedNoLink"] += 1
             continue
         checked_ids.append((pid, aids[0]))      # affiliation changes are read from the main record
+        if pid in lab and pid not in counted:
+            unchecked.append(c["name"])
+            continue
         try:
             works = oa.works_for_author(client, aids, 0, max_works=50, since_date=since_date)
         except HttpError as exc:
@@ -103,12 +134,27 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             if paper_key(p) in have:
                 continue
             have.add(paper_key(p))
+            small = len(w.get("authorships") or []) <= MAX_AUTHORS
+            # The lab members named on the work, the person included, for whom it does not count.
+            doubt = {m for m in {pid, *(by_oa.get(co["id"]) for co in oa.coauthors(w))} & lab
+                     if w.get("id") not in counted.get(m, ())} if small else set()
+            if doubt and not complete:
+                held.add(w.get("id") or link)   # not recorded, so the next refresh checks it again
+                continue
             updates.setdefault(pid, {"id": pid, "papers": []})["papers"].append(p)
             digest["papers"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"], "url": link})
+            if not small:
+                continue
+            if pid in doubt:
+                digest["leftOut"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
+                                          "url": link})
+                continue
             for co in oa.coauthors(w):
                 if co["id"] in aids:
                     continue
                 other = by_oa.get(co["id"])
+                if other in doubt:
+                    continue                    # the work is that lab member's too, and does not count for them
                 if other is None and pid in lab and co["id"] not in new_contacts:
                     other = _new_person(nb, co, new_contacts)
                     by_oa[co["id"]] = other
@@ -129,6 +175,15 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
                                                "Coauthorship alone does not show mentorship or a current collaboration."),
                                   "relationshipStatus": "unknown", "relationshipLabel": "Coauthors"})
                 digest["newTies"].append({"from": a, "to": b, "title": title})
+    if unchecked:
+        digest["errors"].append(f"The new papers of {', '.join(unchecked)} were not read, because their OpenAlex works "
+                                "could not be checked; the next refresh reads them.")
+    if held:
+        one = len(held) == 1
+        digest["errors"].append(f"{len(held)} new {'paper was' if one else 'papers were'} not recorded, because a "
+                                f"record needed to check {'it' if one else 'them'} against what is known about the lab "
+                                f"could not be read; the next refresh checks {'it' if one else 'them'} again.")
+    digest["heldBack"] = bool(unchecked or held)       # refresh() then keeps the date of the last refresh
     # Affiliation changes, read in batches.
     authors = oa.get_authors(client, [a for _, a in checked_ids]) if checked_ids else {}
     for pid, aid in checked_ids:
@@ -211,6 +266,20 @@ def write_digest(ws: Workspace, digest: Dict[str, Any], result: Optional[Dict[st
                      "update file from the Data screen to decide.")
         lines.extend(f"- {x}" for x in d["heldForReview"])
         lines.append("")
+    if d.get("leftOut"):
+        lines.append(f"## Lab members' new papers that added no coauthors ({len(d['leftOut'])})")
+        lines.append("OpenAlex sometimes files two researchers with the same name under one record. These papers on a "
+                     "lab member's record connect to nothing else known about them, so their coauthors were not added, "
+                     "and a later refresh does not read them again. A paper counts once the ORCID record whose iD is "
+                     "on the member's record lists it, once someone records a relationship with one of its coauthors, "
+                     "or once the institution it lists for the member is on their record; `expand` then adds its "
+                     "coauthors.")
+        lines.extend(f"- {x['name']}: {x['title']} ({x['year']}) {x['url']}" for x in d["leftOut"][:200])
+        lines.append("")
+    if d.get("checks"):
+        lines.append("## For a person to check")
+        lines.extend(f"- {x}" for x in d["checks"])
+        lines.append("")
     if d.get("errors"):
         lines.append("## Problems")
         lines.extend(f"- {e}" for e in d["errors"])
@@ -262,6 +331,11 @@ def refresh(ws_path: str, scope: int = 1, since: Optional[str] = None, dry_run: 
     d = plan["digest"]
     log(f"Checked {d['checked']} people: {len(d['papers'])} new papers, {len(d['newPeople'])} new people, "
         f"{len(d['newTies'])} new coauthor ties, {len(d['affiliation'])} possible moves, {len(d['grants'])} new awards.")
+    if d["leftOut"]:
+        log(f"{len(d['leftOut'])} of the lab members' new papers connect to nothing else known about them and added no "
+            "coauthors.")
+    for x in d["checks"]:
+        log(f"To check: {x}")
     if dry_run:
         return {"dryRun": True, "digest": d}
     filename = f"refresh-{today()}.json"
@@ -277,8 +351,11 @@ def refresh(ws_path: str, scope: int = 1, since: Optional[str] = None, dry_run: 
             result["heldForReview"] = _held(prev)
         finally:
             ws.release_lock()
-    ws.config.setdefault("settings", {})["lastRefresh"] = today()
-    ws.save_config()
+    if d["heldBack"]:           # the next refresh reads the same papers again
+        log("Some papers were held back (see the digest), so the date of the last refresh stays as it was.")
+    else:
+        ws.config.setdefault("settings", {})["lastRefresh"] = today()
+        ws.save_config()
     path = write_digest(ws, d, result)
     log(f"Digest written to {path}")
     return {"dryRun": False, "digest": d, "result": result, "digestPath": path}

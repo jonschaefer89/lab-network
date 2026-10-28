@@ -184,6 +184,12 @@ A second run adds only the missing records, so a run that plans nothing confirms
 is running, `expand` applies the plan through it, which accepts plans up to 25 MB; for a larger plan, `expand` asks
 you to stop the app and run it again.
 
+Onboarding and the scheduled refresh follow the same rules for lab members' coauthors: they read coauthors only from
+papers with 30 or fewer authors, and add a lab member's coauthors only from papers that count. Onboarding checks the
+papers against the relationships in `lab.json`, since nothing else is recorded yet, and `packet/source-manifest.json`
+says how many of each member's papers it left out. A refresh lists the new papers it left out in its digest; once such
+a paper counts, `expand` adds its coauthors.
+
 ### The research library
 
 ```bash

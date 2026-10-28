@@ -15,7 +15,7 @@ copy for your lab, which goes online only if you build and deploy it yourself ([
 
 | Occasion | Data sent | Recipient |
 |---|---|---|
-| `onboard`, `expand`, `library` and `refresh` | Names, ORCID iDs and OpenAlex author IDs of the people being looked up; your email if you set `contactEmail` | OpenAlex (api.openalex.org); `onboard` and `expand` also ask ORCID (pub.orcid.org) |
+| `onboard`, `expand`, `library` and `refresh` | Names, ORCID iDs and OpenAlex author IDs of the people being looked up; your email if you set `contactEmail` | OpenAlex (api.openalex.org); `onboard`, `expand` and `refresh` also ask ORCID (pub.orcid.org) |
 | `library`, its weekly update, and `onboard` (which builds the library) | Names of people within the degree limit, and NIH profile IDs of matched investigators | NIH RePORTER (api.reporter.nih.gov) and NSF (api.nsf.gov) |
 | Opening a person's page | Their OpenAlex author ID and NIH profile ID, to check for papers and awards newer than the last update. Off in the demo, and after `config WORKSPACE --live-check off`. | OpenAlex and NIH RePORTER |
 | `onboard` and `refresh` | NIH RePORTER profile IDs of lab members | NIH RePORTER (api.reporter.nih.gov) |

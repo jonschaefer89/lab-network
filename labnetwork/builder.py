@@ -8,6 +8,10 @@ Identity rules:
 * Lab members must be matched to an OpenAlex author by ORCID or confirmed by a person.
 * Coauthors use OpenAlex's own author clusters; their profiles are marked
   "uncertain" because that clustering is algorithmic.
+* Coauthors come from papers with 30 or fewer authors. A person confirmed each lab
+  member's OpenAlex record, not each work on it, and OpenAlex sometimes files two
+  researchers with the same name under one record, so a lab member's work adds
+  coauthors only when it counts by the rule expand applies.
 * A doctorate is "confirmed" only from an ORCID education record; otherwise the
   field is left out (not classified), which never means "no doctorate".
 * Every relationship cites the works or award it comes from. Shared institutions
@@ -22,14 +26,16 @@ import os
 import re
 import shutil
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .connectors import openalex as oa
 from .connectors import orcid as orc
 from .connectors import reporter as rp
 from .connectors.http import Client, HttpError
-from .model import name_key, norm_text, paper_key
-from .packet import BUNDLED_SCHEMA, sha256_file, validate_rules, validate_schema
+from .expand import MAX_AUTHORS, lab_works_that_count
+from .graph import Graph, TieFilter
+from .model import Notebook, name_key, norm_text, paper_key
+from .packet import BUNDLED_SCHEMA, Packet, sha256_file, validate_rules, validate_schema
 from .service import slugify
 from .store import utc_now
 
@@ -121,6 +127,16 @@ def resolve_members(lab: Dict[str, Any], client: Client, choose: Optional[Callab
 
 
 # ---------------------------------------------------------------------------- build
+
+class _Draft:
+    """The lab before its packet exists, with the two parts of a Service that expand's identity rules read."""
+
+    def __init__(self, nb: Notebook):
+        self.nb = nb
+
+    def graph(self, tf: TieFilter = TieFilter()) -> Graph:
+        return Graph(self.nb, tf)
+
 
 class _Builder:
     def __init__(self, lab: Dict[str, Any], client: Client, log: Callable[[str], None]):
@@ -273,16 +289,62 @@ class _Builder:
             else:
                 self.unresolved += 1
 
+    def counted_works(self) -> Dict[str, Set[str]]:
+        """The OpenAlex works, by ID, that count for each lab member by the rule expand applies. The rule reads what
+        is known about the lab: here, the members and the relationships the lab reported, drafted as a notebook in
+        the way reported() later records them. The NIH awards are read after this, so they do not count."""
+        lab_ids = [m["id"] for m in self.lab["members"]]
+        contacts = [self.contacts[cid] for cid in lab_ids]
+        by_oa = dict(self.by_oa)
+        by_name = {name_key(c["name"]): c["id"] for c in contacts}
+        edges = []
+        for i, r in enumerate(self.lab.get("relationships") or []):
+            if r.get("type") not in REL_TYPES or r.get("member") not in lab_ids:
+                continue
+            aid = oa.short_id(r.get("openalexId") or "")
+            other = by_oa.get(aid) if aid else None
+            if other is None and r.get("name"):
+                other = by_name.get(name_key(r["name"]))
+            if other is None:
+                if not r.get("name"):
+                    continue
+                other = f"reported-{i}"
+                sources = [{"url": oa.author_url(aid), "note": "OpenAlex author record, reported by the lab"}] \
+                    if aid else []
+                contacts.append(self.base(other, r["name"], institution=r.get("institution") or "", sources=sources))
+                by_name[name_key(r["name"])] = other
+                if aid:
+                    by_oa[aid] = other
+            edges.append({"id": f"reported-{i}", "from": r["member"], "to": other, "type": r["type"],
+                          "provenance": "reported", "confidence": "confirmed", "status": "reviewed"})
+        nb = Notebook(Packet("", {"contacts": contacts, "edges": edges}, [{"id": x} for x in lab_ids], None, None, {},
+                             "", 0), [], lab_ids)
+        problems: List[str] = []
+        kept, left, _ = lab_works_that_count(_Draft(nb), self.client, problems, problems)   # the problems are noted
+        since = lambda ws: [w for w in ws if (w.get("publication_year") or 0) >= self.s["sinceYear"]]
+        counts = [f"{self.contacts[cid]['name']}, {len(since(works))} of {len(since(works)) + len(since(kept[cid]))}"
+                  for cid, works in left.items() if since(works)]
+        if counts:              # one note, so the manifest's limitations keep it however many members there are
+            self.notes.append(f"Lab members' OpenAlex works since {self.s['sinceYear']} with {MAX_AUTHORS} or fewer "
+                              "authors that connect to nothing else known about them, so their coauthors were not "
+                              "added (OpenAlex sometimes files two researchers with the same name under one record): "
+                              + "; ".join(counts) + ".")
+        self.notes += problems
+        return {cid: {w.get("id") for w in works} for cid, works in kept.items()}
+
     def first_degree(self) -> Dict[str, List[str]]:
         s = self.s
         member_oa = {oa.short_id(m["openalexId"]): m["id"] for m in self.lab["members"]
                      if m.get("openalexId") and m["openalexId"] != "none"}
+        counted = self.counted_works()
         counts: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         for aid, cid in member_oa.items():
             works = oa.works_for_author(self.client, aid, s["sinceYear"], max_works=300)
             self.log(f"  {self.contacts[cid]['name']}: {len(works)} works since {s['sinceYear']}")
             for w in works:
                 self.works_by_person[cid][w.get("id")] = w
+                if w.get("id") not in counted.get(cid, ()) or len(w.get("authorships") or []) > MAX_AUTHORS:
+                    continue
                 for co in oa.coauthors(w):
                     if co["id"] != aid:
                         counts[cid][co["id"]].append(w)
@@ -353,6 +415,8 @@ class _Builder:
             per: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for w in works:
                 self.works_by_person[cid][w.get("id")] = w
+                if len(w.get("authorships") or []) > MAX_AUTHORS:
+                    continue
                 for co in oa.coauthors(w):
                     if co["id"] != aid:
                         per[co["id"]].append(w)
@@ -559,8 +623,10 @@ class _Builder:
             "appliedSeeds": [],
             "coverage": {"updatedAt": self.today,
                          "scope": (f"OpenAlex coauthors of lab members since {self.s['sinceYear']} (up to "
-                                   f"{self.s['maxCoauthorsPerMember']} per member)"
-                                   + (f", their most frequent coauthors (up to {self.s['maxNewPerBridge']} each)" if self.s["secondDegree"] else "")
+                                   f"{self.s['maxCoauthorsPerMember']} per member) on papers with {MAX_AUTHORS} or "
+                                   "fewer authors that connect to what is known about the member"
+                                   + (f", their most frequent coauthors on papers with {MAX_AUTHORS} or fewer authors "
+                                      f"(up to {self.s['maxNewPerBridge']} each)" if self.s["secondDegree"] else "")
                                    + ", NIH RePORTER principal-investigator awards for members with a profile ID, "
                                    "and relationships the lab reported during onboarding."),
                          "seedIds": lab_ids, "status": "bounded-complete",

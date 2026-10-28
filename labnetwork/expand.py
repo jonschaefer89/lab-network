@@ -698,10 +698,11 @@ def _only_through(P: _Plan, flagged: Set[str]) -> Dict[str, List[str]]:
     return out
 
 
-def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], checks: List[str]) -> Set[str]:
+def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], checks: List[str],
+                       unread: Optional[Set[str]] = None) -> Set[str]:
     """The DOIs a lab member lists on the ORCID records whose iDs are on their own record, read fresh each run. An iD
     that OpenAlex shows on their author record but that is not on their record does not count; it is listed for a
-    person to check."""
+    person to check. A member whose ORCID record cannot be read is added to `unread`."""
     name, given, dois = P.contacts[pid]["name"], P.given_orcids(pid), set()
     for o in given:
         if not oc.valid(o):
@@ -715,6 +716,8 @@ def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], ch
         except HttpError as exc:
             errors.append(f"{name}: ORCID record {o} could not be read ({exc}), so no work of theirs counted for being "
                           "listed there.")
+            if unread is not None:
+                unread.add(pid)
     for o in P.orcids(pid):
         if o not in given:
             checks.append(f"{name}: their OpenAlex record lists the ORCID iD {o}, which is not on their record. If it "
@@ -724,8 +727,8 @@ def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], ch
 
 
 def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[str, Any]]], beyond_oa: Set[str],
-                       errors: List[str], checks: List[str]) -> Tuple[Dict[str, List[Dict[str, Any]]],
-                                                                       Dict[str, List[Dict[str, Any]]]]:
+                       errors: List[str], checks: List[str], unread: Optional[Set[str]] = None
+                       ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
     """The works that count for each lab member, and the works left out. A person confirmed each member's OpenAlex
     record, not each work on it, and OpenAlex sometimes files two researchers with the same name under one record. A
     work counts when it names another lab member, someone whose relationship with the lab shows more than an OpenAlex
@@ -734,7 +737,7 @@ def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[
     institution where two such works list them. Members' works vouch for one another's coauthors, so the works that
     count are found in passes until a pass adds none."""
     mine = {pid: set(P.oa_of[pid]) for pid in lab_works}
-    listed = {pid: _given_orcid_works(P, client, pid, errors, checks) for pid in lab_works}
+    listed = {pid: _given_orcid_works(P, client, pid, errors, checks, unread) for pid in lab_works}
     found: Dict[Tuple[str, str], Optional[str]] = {}
 
     def who(aid: str, nm: str, ins: List[str], pid: str) -> Optional[str]:
@@ -777,6 +780,38 @@ def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[
         ids = {id(w) for w in kept[pid]}
         left[pid] = [w for w in works if id(w) not in ids]
     return kept, left
+
+
+def _beyond_oa(P: _Plan) -> Set[str]:
+    """People whose relationship with the lab shows more than an OpenAlex coauthorship."""
+    return {q for o in P.lab for q in P.g.nbrs.get(o, ()) if q not in P.lab and P.entered(q, o)}
+
+
+def lab_works_that_count(svc: Service, client: Client, errors: List[str], checks: List[str],
+                         lib: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, List[Dict[str, Any]]],
+                                                                          Dict[str, List[Dict[str, Any]]], Set[str]]:
+    """Step 2's rule for the scheduled refresh and onboarding, which add a lab member's coauthors only from the works
+    that count: each lab member's works with 30 or fewer authors that count (`_lab_members_works`), the works left out,
+    and the members whose OpenAlex works or ORCID records could not be read. With such a member, fewer works count than
+    would otherwise, for them and for the other members. `svc` is the Service, or a draft with the same `nb` and `graph`
+    (onboarding's, before the packet exists). A lab member without OpenAlex records is not looked up, and a member whose
+    OpenAlex records cannot be read has no works."""
+    P = _Plan(svc, 0, lib)
+    lab_works: Dict[str, List[Dict[str, Any]]] = {}
+    unread: Set[str] = set()
+    for pid in P.nb.root_ids:
+        if pid not in P.active or pid not in P.oa_of:
+            continue
+        try:
+            lab_works[pid], _ = _all_works(client, P.oa_of[pid])
+        except BudgetReached:
+            raise
+        except HttpError as exc:
+            errors.append(f"{P.contacts[pid]['name']}: OpenAlex could not be read ({exc}), so none of their works "
+                          "counted.")
+            unread.add(pid)
+    kept, left = _lab_members_works(P, client, lab_works, _beyond_oa(P), errors, checks, unread)
+    return kept, left, unread
 
 
 def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person: Optional[int] = None,
@@ -842,8 +877,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
             coverage[pid] = {"status": "not-found", "degree": 0}
             log(f"  {name}: not found in OpenAlex")
     lab_ids = {a for pid in lab for a in P.oa_of.get(pid, [])}
-    # People whose relationship with the lab shows more than an OpenAlex coauthorship.
-    beyond_oa = {q for o in P.lab for q in P.g.nbrs.get(o, ()) if q not in P.lab and P.entered(q, o)}
+    beyond_oa = _beyond_oa(P)
     checks: List[str] = []
     lab_works, lab_left = _lab_members_works(P, client, lab_works, beyond_oa, errors, checks)
 
