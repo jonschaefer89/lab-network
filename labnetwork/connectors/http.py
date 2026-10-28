@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, Optional
 
-USER_AGENT = "LabNetwork/0.1 (local research-network notebook; https://github.com/)"
+USER_AGENT = "LabNetwork/0.1 (local research-network notebook; https://github.com/jonschaefer89/lab-network)"
 
 # Seconds between requests to the same host (the services' published etiquette, rounded up).
 MIN_INTERVAL = {
