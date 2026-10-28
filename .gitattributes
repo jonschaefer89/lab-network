@@ -1,0 +1,3 @@
+# Check text files out with the LF line endings they were committed with, on every system. The demo packet is
+# verified against packet-checksums.json, and a checkout that converts it to CRLF (Windows) would fail that check.
+* text=auto eol=lf

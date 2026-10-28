@@ -205,7 +205,7 @@ class OnboardingTests(unittest.TestCase):
         lab, out, summary = self.build()
         rep = validation_report(load_packet(out))
         self.assertTrue(rep["ok"], [c for c in rep["checks"] if not c["ok"]])
-        with open(os.path.join(out, "notebook.json")) as f:
+        with open(os.path.join(out, "notebook.json"), encoding="utf-8") as f:
             nb = json.load(f)
         people = {c["name"]: c for c in nb["contacts"]}
         self.assertEqual(set(people), {"Pat Rivera", "Sam Okafor", "Chris Lindqvist", "Dana Moreau", "Eli Watanabe",

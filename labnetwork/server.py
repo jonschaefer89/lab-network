@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import socketserver
 import sys
 import threading
 import traceback
@@ -30,6 +31,15 @@ CSP = ("default-src 'self'; img-src 'self' https: http: data:; script-src 'self'
        "connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 Route = Tuple[str, "re.Pattern[str]", Callable]
+
+
+class LocalServer(ThreadingHTTPServer):
+    """Skips HTTPServer's reverse DNS lookup of its own address, which can delay the start by many seconds on some
+    Macs; the server only ever answers on 127.0.0.1."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class App:
@@ -272,7 +282,7 @@ def _poll_slack(svc: Service, first_delay: float = 5.0) -> None:
 def serve(svc: Service, port: int = 8765, open_browser: bool = False,
           ready: Optional[threading.Event] = None) -> None:
     app = App(svc, port)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+    httpd = LocalServer(("127.0.0.1", port), make_handler(app))
     httpd.daemon_threads = True
     svc.ws.acquire_lock(port)
     url = f"http://127.0.0.1:{port}/"

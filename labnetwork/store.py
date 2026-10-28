@@ -62,7 +62,12 @@ class Workspace:
         if os.path.exists(os.path.join(path, CONFIG_NAME)):
             raise WorkspaceError(f"{path} already holds a workspace")
         packet = load_packet(packet_dir, roots_override=roots)
-        if os.path.commonpath([path, packet.path]) == packet.path:
+        try:
+            inside = os.path.commonpath([path, packet.path]) == packet.path
+            packet_ref = os.path.relpath(packet.path, path)
+        except ValueError:                    # on different Windows drives: kept by its full path
+            inside, packet_ref = False, packet.path
+        if inside:
             raise WorkspaceError("The workspace must not live inside the packet directory")
         os.makedirs(path, exist_ok=True)
         cfg = {
@@ -72,7 +77,7 @@ class Workspace:
             "createdAt": utc_now(),
             "labName": lab_name,
             "packet": {
-                "path": os.path.relpath(packet.path, path),
+                "path": packet_ref,
                 "sha256": packet.sha256,
                 "bytes": packet.size,
             },
@@ -233,11 +238,16 @@ class Workspace:
 def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         import ctypes
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            # A process that has exited can still be opened while another program holds a handle to it.
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

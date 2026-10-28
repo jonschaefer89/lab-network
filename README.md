@@ -26,7 +26,7 @@ Plan on about fifteen minutes of your time. The library build takes 10 to 40 min
 ## Try the demo lab
 
 To look without installing anything, open the [live demo](https://jonschaefer89.github.io/lab-network/): the
-fictional lab, read-only, running in your browser. The first visit downloads about 13 MB.
+fictional lab, read-only, running in your browser. The first visit downloads about 6 MB.
 
 To run it on your computer, you need Python 3.9 or newer. Nothing else is installed.
 

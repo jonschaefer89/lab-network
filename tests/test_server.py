@@ -5,6 +5,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -25,17 +26,19 @@ def free_port():
 class Server:
     def __init__(self, ws_path):
         self.port = free_port()
+        self.err = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "labnetwork.py"), "serve", ws_path,
-                                      "--port", str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.time() + 15
-        while time.time() < deadline:
+                                      "--port", str(self.port)], stdout=subprocess.DEVNULL, stderr=self.err)
+        deadline = time.time() + 60           # hosted test machines can be slow to start Python
+        while time.time() < deadline and self.proc.poll() is None:
             try:
                 self.get("/api/state")
                 return
             except (urllib.error.URLError, ConnectionError):
                 time.sleep(0.1)
         self.stop()
-        raise RuntimeError("server did not start")
+        self.err.seek(0)
+        raise RuntimeError("server did not start: " + self.err.read().decode("utf-8", "replace")[-2000:])
 
     def request(self, method, path, body=None, headers=None):
         data = json.dumps(body).encode() if body is not None else None

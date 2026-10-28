@@ -366,7 +366,9 @@ def _download(url: str) -> bytes:
 def preview(folder: str, port: int = 8790, open_browser: bool = False) -> int:
     """Serve a shared copy on this computer only, with the response headers it will have online."""
     import webbrowser
-    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from http.server import SimpleHTTPRequestHandler
+
+    from .server import LocalServer
 
     folder = os.path.abspath(os.path.expanduser(folder))
     if not os.path.isfile(os.path.join(folder, "_headers")):
@@ -401,7 +403,7 @@ def preview(folder: str, port: int = 8790, open_browser: bool = False) -> int:
             pass
 
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        server = LocalServer(("127.0.0.1", port), Handler)
     except OSError as exc:
         raise SiteError(f"Port {port} is not free ({exc.strerror}). Choose another with --port.")
     url = f"http://127.0.0.1:{port}/"
