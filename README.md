@@ -162,8 +162,9 @@ or more such papers since the start year with someone in the first degree, inclu
 lab member. A preprint and its article count as one paper, and corrections not at all. It reads every OpenAlex record
 linked to a person and the papers they list on ORCID. OpenAlex sometimes files two researchers with the same name under
 one record, so a paper counts only when it names someone already in the network (other than people that `expand` or
-onboarding added to the second degree), was recorded with a lab member, or lists the person at their recorded
-institution or at an institution where two such papers list them. A person confirms a lab member's OpenAlex record,
+onboarding added to the second degree, and a lab member on a paper that does not count for them), was recorded with
+a lab member, or lists the person at their recorded institution or at an institution where two such papers list
+them. A person confirms a lab member's OpenAlex record,
 not each paper on it, so a lab member's paper counts when it names another lab member, someone whose relationship with
 the lab is more than a coauthor record written from OpenAlex (onboarding, `expand` and the scheduled refresh write
 those, and their evidence says "indexed by OpenAlex"), or someone named on another member's papers that count;
@@ -184,11 +185,13 @@ A second run adds only the missing records, so a run that plans nothing confirms
 is running, `expand` applies the plan through it, which accepts plans up to 25 MB; for a larger plan, `expand` asks
 you to stop the app and run it again.
 
-Onboarding and the scheduled refresh follow the same rules for lab members' coauthors: they read coauthors only from
-papers with 30 or fewer authors, and add a lab member's coauthors only from papers that count. Onboarding checks the
-papers against the relationships in `lab.json`, since nothing else is recorded yet, and `packet/source-manifest.json`
-says how many of each member's papers it left out. A refresh lists the new papers it left out in its digest; once such
-a paper counts, `expand` adds its coauthors.
+Onboarding and the scheduled refresh follow the same rules. They read coauthors only from papers with 30 or fewer
+authors and add a lab member's coauthors only from papers that count for that member. Onboarding adds a first-degree
+person's coauthors, and a refresh adds coauthor records between people outside the lab, only from papers that count
+for that person by the rule above; a refresh also leaves out first-degree people whose relationship with the lab
+nothing confirms. Onboarding checks the papers against the relationships in `lab.json`, since nothing else is recorded
+yet, and `packet/source-manifest.json` says how many of each member's papers it left out. A refresh lists the new
+papers it left out in its digest; once such a paper counts, `expand` adds its coauthors.
 
 ### The research library
 

@@ -346,9 +346,67 @@ class OnboardingTests(unittest.TestCase):
         pairs = {frozenset((names[e["from"]], names[e["to"]])) for e in nb["edges"] if e["type"] == "coauthor"}
         self.assertNotIn(frozenset(("Chris Lindqvist", "Eli Watanabe")), pairs)
 
+    def test_build_reads_coauthors_of_coauthors_only_from_works_that_connect_to_them(self):
+        # Chris's record also holds a namesake's two papers from Remote Academy, both with Thaddeus. Chris's own papers
+        # from Northfield still bring in Farah and Gus.
+        self.add_people(OTHERS)
+        self.api.works["A3"] += [
+            work("W73", "A namesake's paper with Thaddeus", YEAR - 2, ["A3", "A21"], insts={"A3": RA}),
+            work("W74", "A namesake's second paper with Thaddeus", YEAR - 3, ["A3", "A21"], insts={"A3": RA})]
+        _, out, _ = self.build()
+        _, people = self.packet(out)
+        self.assertNotIn("Thaddeus Quorn", people)
+        self.assertTrue({"Farah Nadeem", "Gus Tamm"} <= people, people)
+
     def built_workspace(self):
         _, out, _ = self.build()
         return Workspace.create(os.path.join(self.tmp, "ws"), out, lab_name="Rivera Lab")
+
+    def test_refresh_adds_coauthor_records_only_from_works_that_connect_to_a_person(self):
+        # An earlier run tied Ottilie to Pat from a namesake's paper on Pat's record, so nothing confirms her place in
+        # the network: her new paper with Chris adds no coauthor record. Dana's new paper at her own institution with
+        # Gus adds one; her paper from somewhere else that names only Farah, whom onboarding added, does not.
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        svc, actor = Service(Workspace(ws.path)), "expand (OpenAlex)"
+        ott = svc.create_contact({"fields": {"name": "Ottilie Quarrington", "institution": RA}}, actor)["id"]
+        svc.add_source(ott, {"url": "https://openalex.org/A20", "note": "OpenAlex author record"}, actor)
+        svc.create_tie({"fields": {"from": "pat-rivera", "to": ott, "type": "coauthor", "provenance": "public",
+                                   "sourceTitle": f"A namesake's first paper ({YEAR - 4})",
+                                   "sourceUrl": "https://openalex.org/W20",
+                                   "evidence": "Named together on 1 work indexed by OpenAlex"}}, actor)
+        today = dt.date.today().isoformat()
+        self.api.works["A1"].append(work("W20", "A namesake's first paper", YEAR - 4, ["A1", "A20"], insts={"A1": RA}))
+        self.api.works["A20"] = [work("W70", "Ottilie and Chris", YEAR, ["A20", "A3"], date=today)]
+        self.api.works["A4"][:0] = [work("W71", "Dana and Gus at Hill College", YEAR, ["A4", "A7"], date=today),
+                                    work("W72", "Dana and Farah elsewhere", YEAR, ["A4", "A6"], date=today,
+                                         insts={"A4": RA})]
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual({frozenset((t["from"], t["to"])) for t in d["newTies"]},
+                         {frozenset(("dana-moreau", "gus-tamm"))})
+        self.assertEqual(sorted((x["name"], x["title"], x["unconfirmed"]) for x in d["unconnected"]),
+                         [("Dana Moreau", "Dana and Farah elsewhere", False),
+                          ("Ottilie Quarrington", "Ottilie and Chris", True)])
+        self.assertEqual(sorted(p["title"] for p in d["papers"]),          # every new paper is still on its profile
+                         ["Dana and Farah elsewhere", "Dana and Gus at Hill College", "Ottilie and Chris"])
+
+    def test_a_paper_that_does_not_connect_waits_while_a_record_cannot_be_read(self):
+        # Pat's ORCID record cannot be read, so fewer works count and Dana's paper from elsewhere waits; her paper at
+        # her own institution is added.
+        ws = self.built_workspace()
+        today = dt.date.today().isoformat()
+        self.api.works["A4"][:0] = [work("W71", "Dana and Gus at Hill College", YEAR, ["A4", "A7"], date=today),
+                                    work("W72", "Dana and Farah elsewhere", YEAR, ["A4", "A6"], date=today,
+                                         insts={"A4": RA})]
+        self.api.fails = lambda url: "pub.orcid.org" in url and url.endswith("/works")
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([p["title"] for p in d["papers"]], ["Dana and Gus at Hill College"])
+        self.assertEqual(([(t["from"], t["to"]) for t in d["newTies"]], d["unconnected"]),
+                         ([("dana-moreau", "gus-tamm")], []))
+        self.assertTrue(any(e.startswith("1 new paper was not recorded") for e in d["errors"]), d["errors"])
+        self.api.fails = lambda url: False
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual([x["title"] for x in d["unconnected"]], ["Dana and Farah elsewhere"])
 
     def test_refresh_adds_coauthors_only_from_a_members_new_works_that_count(self):
         ws = self.built_workspace()

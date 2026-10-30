@@ -728,8 +728,9 @@ def _given_orcid_works(P: _Plan, client: Client, pid: str, errors: List[str], ch
 
 def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[str, Any]]], beyond_oa: Set[str],
                        errors: List[str], checks: List[str], unread: Optional[Set[str]] = None
-                       ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
-    """The works that count for each lab member, and the works left out. A person confirmed each member's OpenAlex
+                       ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Set[str]]:
+    """The works that count for each lab member, the works left out, and the people in the notebook that the works
+    that count name. A person confirmed each member's OpenAlex
     record, not each work on it, and OpenAlex sometimes files two researchers with the same name under one record. A
     work counts when it names another lab member, someone whose relationship with the lab shows more than an OpenAlex
     coauthorship (`beyond_oa`), or someone named on another member's works that count; when it is on an ORCID
@@ -779,7 +780,7 @@ def _lab_members_works(P: _Plan, client: Client, lab_works: Dict[str, List[Dict[
     for pid, works in lab_works.items():
         ids = {id(w) for w in kept[pid]}
         left[pid] = [w for w in works if id(w) not in ids]
-    return kept, left
+    return kept, left, {x for xs in named.values() for x in xs if x in P.contacts}
 
 
 def _beyond_oa(P: _Plan) -> Set[str]:
@@ -787,31 +788,116 @@ def _beyond_oa(P: _Plan) -> Set[str]:
     return {q for o in P.lab for q in P.g.nbrs.get(o, ()) if q not in P.lab and P.entered(q, o)}
 
 
-def lab_works_that_count(svc: Service, client: Client, errors: List[str], checks: List[str],
-                         lib: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, List[Dict[str, Any]]],
-                                                                          Dict[str, List[Dict[str, Any]]], Set[str]]:
-    """Step 2's rule for the scheduled refresh and onboarding, which add a lab member's coauthors only from the works
-    that count: each lab member's works with 30 or fewer authors that count (`_lab_members_works`), the works left out,
-    and the members whose OpenAlex works or ORCID records could not be read. With such a member, fewer works count than
-    would otherwise, for them and for the other members. `svc` is the Service, or a draft with the same `nb` and `graph`
-    (onboarding's, before the packet exists). A lab member without OpenAlex records is not looked up, and a member whose
-    OpenAlex records cannot be read has no works."""
-    P = _Plan(svc, 0, lib)
-    lab_works: Dict[str, List[Dict[str, Any]]] = {}
-    unread: Set[str] = set()
-    for pid in P.nb.root_ids:
-        if pid not in P.active or pid not in P.oa_of:
-            continue
-        try:
-            lab_works[pid], _ = _all_works(client, P.oa_of[pid])
-        except BudgetReached:
-            raise
-        except HttpError as exc:
-            errors.append(f"{P.contacts[pid]['name']}: OpenAlex could not be read ({exc}), so none of their works "
-                          "counted.")
-            unread.add(pid)
-    kept, left = _lab_members_works(P, client, lab_works, _beyond_oa(P), errors, checks, unread)
-    return kept, left, unread
+def _anchor_people(P: _Plan, first: Set[str], unshown: Set[str]) -> Dict[str, str]:
+    """OpenAlex ID -> the person in the network it names, for everyone who may vouch for a first-degree person's work
+    (step 4). Not a first-degree person whose only relationship with the lab nothing confirms (`unshown`), and not
+    someone expand or onboarding added to the second degree unless they are first degree now (`first`): they are known
+    only from the kind of OpenAlex coauthorship this step checks, and counting them would let each run vouch for the
+    papers the run before it left out."""
+    return {aid: q for aid, q in P.by_oa.items() if q not in unshown and
+            (q in first or not SECOND_DEGREE_TAGS & set((P.contacts.get(q) or {}).get("tags") or []))}
+
+
+def _voucher(P: _Plan, anchors: Dict[str, str], roots: Set[str], lab_counted: Dict[str, Set[str]],
+             pid: str) -> Callable[[str, Dict[str, Any]], bool]:
+    """Whether the person an authorship names (by OpenAlex ID) vouches for a work of the first-degree person `pid`:
+    someone in `anchors` other than them whose place in the network rests on more than a tie to them (a member of
+    `roots`, or someone with other relationships). A lab member vouches only for a work that counts for them
+    (`lab_counted`, OpenAlex IDs), since their record may hold a namesake's papers."""
+    def vouches(aid: str, w: Dict[str, Any]) -> bool:
+        q = anchors.get(aid)
+        if q in (None, pid) or not (q in roots or P.g.nbrs.get(q, set()) - {pid}):
+            return False
+        return q not in P.lab or w.get("id") in lab_counted.get(q, ())
+    return vouches
+
+
+def _first_degree_anchor(mine: Set[str], places: List[str], known: Set[str],
+                         vouches: Callable[[str, Dict[str, Any]], bool]) -> Callable[[Dict[str, Any]], bool]:
+    """Step 4's test of whether a first-degree person's work connects by itself to what is known about them: their own
+    authorship (`mine`) lists an institution recorded for them (`places`), it names someone who vouches for it, or it is
+    among their papers with lab members (`known`, paper identifiers). `_anchored` adds the works that list them at an
+    institution where two such works do."""
+    def anchored(w: Dict[str, Any]) -> bool:
+        for a in w.get("authorships") or []:
+            aid = oa.short_id((a.get("author") or {}).get("id") or "")
+            if aid in mine:
+                if any(_inst_match(p, i.get("display_name", "")) for p in places for i in a.get("institutions") or []):
+                    return True
+            elif aid and vouches(aid, w):
+                return True
+        return bool(known) and bool(known & set(_work_ids(w)))
+    return anchored
+
+
+def connected_works(works: List[Dict[str, Any]], mine: Set[str], places: List[str], known_works: List[Dict[str, Any]],
+                    vouches: Callable[[str, Dict[str, Any]], bool], known_ids: Set[str] = frozenset()
+                    ) -> List[Dict[str, Any]]:
+    """The works that count for a person other than a lab member by step 4's rule (`_first_degree_anchor`, then
+    `_anchored`): `mine` are their OpenAlex records, `places` their recorded institutions, `known_works` (or the paper
+    identifiers `known_ids`) their papers with lab members, and `vouches` says who vouches for a work."""
+    known = set(known_ids) | {i for w in known_works for i in _work_ids(w)}
+    return _anchored(works, mine, _first_degree_anchor(mine, places, known, vouches))[0]
+
+
+class LabCheck:
+    """Expand's identity rules for the scheduled refresh and onboarding, which add people and coauthor records from
+    OpenAlex between expand runs. `svc` is the Service, or a draft with the same `nb` and `graph` (onboarding's, before
+    the packet exists).
+
+    Lab members (step 2): each member's works with 30 or fewer authors that count are in `kept`, by OpenAlex ID in
+    `counted`, and the rest in `left`. `unread` holds the members whose OpenAlex works or ORCID records could not be
+    read; with them, fewer works count than would otherwise, for every member and for the people their works vouch
+    for. A lab member without OpenAlex records is not looked up.
+
+    Everyone else (step 4): `collects` leaves out a first-degree person whose only relationship with the lab is a
+    coauthor record written from OpenAlex and whom no lab member's work that counts names, and `anchored` keeps the
+    works that connect to what is known about a person."""
+
+    def __init__(self, svc: Service, client: Client, errors: List[str], checks: List[str],
+                 lib: Optional[Dict[str, Any]] = None):
+        self.P = P = _Plan(svc, 0, lib)
+        lab_works: Dict[str, List[Dict[str, Any]]] = {}
+        self.unread: Set[str] = set()
+        for pid in P.nb.root_ids:
+            if pid not in P.active or pid not in P.oa_of:
+                continue
+            try:
+                lab_works[pid], _ = _all_works(client, P.oa_of[pid])
+            except BudgetReached:
+                raise
+            except HttpError as exc:
+                errors.append(f"{P.contacts[pid]['name']}: OpenAlex could not be read ({exc}), so none of their works "
+                              "counted.")
+                self.unread.add(pid)
+        self.beyond_oa = _beyond_oa(P)
+        self.kept, self.left, self.named = _lab_members_works(P, client, lab_works, self.beyond_oa, errors, checks,
+                                                              self.unread)
+        self.counted = {pid: {w.get("id") for w in works} for pid, works in self.kept.items()}
+        self._step4: Optional[Tuple[Set[str], Dict[str, str], Set[str]]] = None
+
+    def _people(self) -> Tuple[Set[str], Dict[str, str], Set[str]]:
+        """(unshown first-degree people, anchors, roots), worked out once."""
+        if self._step4 is None:
+            P = self.P
+            dist, _ = P.g.lab_distances()
+            first = {p for p, d in dist.items() if d == 1 and p in P.active}
+            unshown = {p for p in first if p not in self.named and p not in self.beyond_oa}
+            self._step4 = (unshown, _anchor_people(P, first - unshown, unshown), P.lab & P.active)
+        return self._step4
+
+    def collects(self, pid: str) -> bool:
+        """Whether step 4 reads this person's works: everyone but a first-degree person whose relationship with the
+        lab nothing confirms."""
+        return pid not in self._people()[0]
+
+    def anchored(self, pid: str, works: List[Dict[str, Any]], mine: Set[str]) -> List[Dict[str, Any]]:
+        """The works of this person (their OpenAlex records: `mine`) that connect to what is known about them."""
+        P = self.P
+        _, anchors, roots = self._people()
+        places = [x.strip() for x in (P.contacts[pid].get("institution") or "").split(";") if x.strip()]
+        return connected_works(works, mine, places, [], _voucher(P, anchors, roots, self.counted, pid),
+                               known_ids=P.lab_paper_ids(pid))
 
 
 def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person: Optional[int] = None,
@@ -879,7 +965,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     lab_ids = {a for pid in lab for a in P.oa_of.get(pid, [])}
     beyond_oa = _beyond_oa(P)
     checks: List[str] = []
-    lab_works, lab_left = _lab_members_works(P, client, lab_works, beyond_oa, errors, checks)
+    lab_works, lab_left, _ = _lab_members_works(P, client, lab_works, beyond_oa, errors, checks)
 
     # 2. Complete the first degree: every coauthor of a lab member on the works that count.
     new_first: List[str] = []
@@ -1054,18 +1140,10 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     since = f"{since_year}-01-01"
     targets = [(p, P.oa_of[p]) for p in first if p in identified] + \
               [(P.new_people[a]["id"], [a]) for a in new_first]
-    # Who is in the network before anyone is added to the second degree. Not the people expand or onboarding added to
-    # the second degree: they are known only from the kind of OpenAlex coauthorship this step checks, and counting them
-    # would let each run vouch for the papers the run before it left out.
-    first_set = set(first)
-    anchors = {aid: q for aid, q in P.by_oa.items() if q not in unshown and
-               (q in first_set or not SECOND_DEGREE_TAGS & set((contacts.get(q) or {}).get("tags") or []))}
+    # Who is in the network before anyone is added to the second degree, and may vouch for a first-degree person's work.
+    anchors = _anchor_people(P, set(first), unshown)
     roots = set(lab) | {P.new_people[a]["id"] for a in new_first}
-
-    def independent(q: str, pid: str) -> bool:
-        """Whether someone's place in the network rests on more than a tie to `pid`."""
-        return q in roots or bool(P.g.nbrs.get(q, set()) - {pid})
-
+    lab_counted = {pid: {w.get("id") for w in works} for pid, works in lab_works.items()}
     orcid_of: Dict[str, str] = {pid: (P.orcids(pid) or [""])[0] for pid, _ in targets if pid in contacts}
     orcid_of.update({P.new_people[a]["id"]: oc.clean((details.get(a) or {}).get("orcid") or "").upper()
                      for a in new_first})
@@ -1117,16 +1195,7 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
         known = P.lab_paper_ids(pid) if pid in contacts else set()
         places = [x.strip() for x in (contacts[pid].get("institution") or "").split(";") if x.strip()] \
             if pid in contacts else []
-
-        def anchored(w: Dict[str, Any]) -> bool:
-            for a in w.get("authorships") or []:
-                aid = oa.short_id((a.get("author") or {}).get("id") or "")
-                if aid in mine_all:
-                    if any(_inst_match(p, i.get("display_name", "")) for p in places for i in a.get("institutions") or []):
-                        return True
-                elif aid and anchors.get(aid) not in (None, pid) and independent(anchors[aid], pid):
-                    return True
-            return bool(known) and bool(known & set(_work_ids(w)))
+        anchored = _first_degree_anchor(mine_all, places, known, _voucher(P, anchors, roots, lab_counted, pid))
         kept, left_out = _anchored(works + listed, mine_all, anchored)
         if left_out and not kept:
             coverage[pid] = {"status": "unanchored", "degree": 1, "works": 0, "unanchored": left_out}
@@ -1155,7 +1224,8 @@ def plan_expand(svc: Service, client: Client, since_year: int = 2016, per_person
     for pid, (ranked, counts, latest, names, insts) in collected.items():
         for aid in ranked:
             target, held = P.resolve(aid, names[aid], insts[aid], pid, counts[aid], min_shared)
-            if target is None or held:
+            # A coauthor record with a lab member comes only from step 2, from a work that counts for the member.
+            if target is None or held or target in P.lab:
                 continue
             if P.add_edge(pid, target, counts[aid], latest[aid], since_year):
                 swept[pid].append((aid, target))

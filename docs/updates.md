@@ -97,12 +97,17 @@ For each person within the chosen degree of the lab (`--scope 1` or `--scope 2`)
 - **Only papers with 30 or fewer authors** add people or ties; a larger paper still goes on the profile. A new person,
   or a tie with a lab member, comes only from a paper that counts for that member by the rule `expand` uses (see
   [Fill in the first and second degree](../README.md#fill-in-the-first-and-second-degree)), because OpenAlex sometimes
-  files two researchers with the same name under one record. To apply the rule, each refresh reads all of the lab
-  members' OpenAlex works and the ORCID records whose iDs are on their records. The digest lists lab members' new
-  papers that added no coauthors, and any ORCID iD for you to check. A later refresh does not read those papers again;
-  once one counts, `expand` adds its coauthors. If a record the check needs cannot be read (a lab member's OpenAlex
-  works or ORCID record, or the research library), the refresh records none of the papers it could not check and keeps
-  the date of the last refresh, so the next refresh reads them again.
+  files two researchers with the same name under one record. Anyone else's new paper adds ties only when it counts for
+  them by `expand`'s rule for first-degree people's papers: its authors include someone in the network who vouches for
+  it, it was recorded with a lab member, or it lists them at their recorded institution or at an institution where two
+  such papers list them. A first-degree person's papers count only when their relationship with the lab is more than a
+  coauthor record written from OpenAlex, or they are an author of a lab member's paper that counts. To apply the
+  rules, each refresh reads the research library, all of the lab members' OpenAlex works, and the ORCID records whose
+  iDs are on their records. The digest lists the new papers that added no coauthors or ties, and any ORCID iD for you
+  to check. A later refresh does not read those papers again; once one counts, `expand` adds its coauthors. If a
+  record the check needs cannot be read (a lab member's OpenAlex works or ORCID record, or the research library), the
+  refresh records none of the papers it could not check and keeps the date of the last refresh, so the next refresh
+  reads them again.
 - **A changed affiliation** is not applied. If OpenAlex lists a different institution, it becomes an open conflict on
   the Data page, and your recorded value stays until you choose.
 - **New NIH awards** for lab members with a RePORTER profile ID are added to their profiles.

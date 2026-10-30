@@ -46,8 +46,11 @@ python3 labnetwork.py serve ~/LabNetwork/my-lab/workspace --open
   in `packet/source-manifest.json` says how many of each member's papers were left out, and `expand` checks them again
   later against everything recorded by then.
 - **Coauthors of coauthors**, unless you turn this off. Up to 5 per first-degree person, again the most frequent, from
-  papers with 30 or fewer authors. These are second-degree people. Their ties are marked "likely" rather than
-  "confirmed", because both identities come from OpenAlex's algorithm.
+  papers with 30 or fewer authors that count for that person. As for lab members, a paper counts when it connects to
+  what is known about them: it lists them at their institution or at an institution where two such papers list them,
+  it is one of their papers with a lab member, or its authors include another first-degree person or a lab member for
+  whom it counts. These are second-degree people. Their ties are marked "likely" rather than "confirmed", because both
+  identities come from OpenAlex's algorithm.
 - **ORCID records** for people who list an ORCID iD. A completed doctorate on the record is stored as confirmed, with
   the record as its source. A current employment entry fills in an empty position.
 - **NIH awards** for members with a RePORTER PI profile ID. Other principal investigators named on the same award are

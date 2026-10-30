@@ -138,7 +138,8 @@ Onboard keeps each lab member's most frequent coauthors (40 by default) and thei
 30 or fewer authors. `expand` adds the rest: every coauthor on each member's papers with 30 or fewer authors, and each
 first-degree person's coauthors on two or more such papers since the start year. It counts only papers that connect to
 what is known about the person, because OpenAlex sometimes files two researchers with the same name under one record.
-Onboard and the scheduled refresh apply the same rule to lab members' papers. A lab member's
+Onboard and the scheduled refresh apply the same rules to the papers of lab members and of everyone else
+they read. A lab member's
 papers listed on the ORCID record whose iD is on their record always count, so record members' ORCID iDs (Step 2).
 The digest lists any iD that OpenAlex shows for a member but that their record lacks; show it to the user, and add it
 only once they confirm it (rule 4). So the first dry run after onboarding usually lists people to add:

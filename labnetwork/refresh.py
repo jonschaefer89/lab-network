@@ -12,9 +12,11 @@ awards, an NIH RePORTER profile ID in their source notes). Packets built by
 
 Coauthors come from papers with 30 or fewer authors. A person confirmed each lab
 member's OpenAlex record, not each work on it, and OpenAlex sometimes files two
-researchers with the same name under one record, so a new person, or a coauthor
-record with a lab member, comes only from a work that counts for that member by
-the rule expand applies.
+researchers with the same name under one record, so refresh applies expand's
+rules (expand.LabCheck): a new person, or a coauthor record with a lab member,
+comes only from a work that counts for that member, and anyone else's work adds
+coauthor records only when expand would collect them and the work connects to
+what is known about them.
 """
 from __future__ import annotations
 
@@ -64,7 +66,7 @@ def _nih_profile(c: Dict[str, Any]) -> Optional[int]:
 def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[str] = None,
                 max_people: int = 600, log: Callable[[str], None] = print,
                 lib: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    from .expand import MAX_AUTHORS, lab_works_that_count       # expand imports this module
+    from .expand import MAX_AUTHORS, LabCheck       # expand imports this module
     nb = svc.nb
     dist, _ = svc.lab_dist()
     settings = svc.ws.config.get("settings") or {}
@@ -81,27 +83,26 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
     new_contacts: Dict[str, Dict[str, Any]] = {}
     new_edges: List[Dict[str, Any]] = []
     digest = {"since": since_date, "scope": scope, "papers": [], "newPeople": [], "newTies": [], "affiliation": [],
-              "grants": [], "leftOut": [], "checked": 0, "skippedNoLink": 0, "checks": [], "errors": []}
+              "grants": [], "leftOut": [], "unconnected": [], "checked": 0, "skippedNoLink": 0, "checks": [],
+              "errors": []}
     existing_pairs = {(e["from"], e["to"], e["type"]) for _, e in nb.active("edges")}
     lab = set(nb.root_ids)
-    # Lab member -> their works that count, by OpenAlex ID. When a record the rule reads could not be read, fewer works
-    # count than should, so a new paper that does not count is held back instead of recorded (`complete` is False).
-    counted: Dict[str, Set[str]] = {}
-    complete = False
+    # Expand's rules. When a record they read could not be read, fewer works count than should, so a new paper the
+    # rules would leave out is held back instead of recorded (`complete` is False).
+    check: Optional[LabCheck] = None
     try:
         if lib is None:
             from .library import load
             lib = load(svc.ws)
     except (OSError, ValueError) as exc:        # without the library a name could match the wrong record: no check
-        digest["errors"].append(f"The research library could not be read ({exc}), so lab members' papers were not "
-                                "checked.")
+        digest["errors"].append(f"The research library could not be read ({exc}), so no new paper was checked.")
     else:
         try:
-            kept, _, unread = lab_works_that_count(svc, client, digest["errors"], digest["checks"], lib)
-            counted = {pid: {w.get("id") for w in works} for pid, works in kept.items()}
-            complete = not unread
+            check = LabCheck(svc, client, digest["errors"], digest["checks"], lib)
         except HttpError as exc:
             digest["errors"].append(f"Lab members' OpenAlex works could not be checked ({exc}).")
+    counted: Dict[str, Set[str]] = check.counted if check else {}     # lab member -> works that count, by OpenAlex ID
+    complete = check is not None and not check.unread
     unchecked: List[str] = []           # lab members whose new papers were not read
     held: Set[str] = set()              # new papers held back, by OpenAlex ID
     checked_ids = []
@@ -122,6 +123,12 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             continue
         digest["checked"] += 1
         have = {paper_key(p) for p in c.get("papers") or []}
+        # Anyone but a lab member: the works expand's step 4 would count for them, by OpenAlex ID. None when expand
+        # would not collect their coauthors at all, because their relationship with the lab is unconfirmed.
+        connects: Optional[Set[str]] = None
+        if pid not in lab and check is not None and check.collects(pid):
+            small_works = [w for w in works if len(w.get("authorships") or []) <= MAX_AUTHORS]
+            connects = {w.get("id") for w in check.anchored(pid, small_works, set(aids))}
         for w in works:
             title, link = oa.work_title(w), oa.work_link(w)
             if not title or not link:
@@ -135,10 +142,12 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
                 continue
             have.add(paper_key(p))
             small = len(w.get("authorships") or []) <= MAX_AUTHORS
-            # The lab members named on the work, the person included, for whom it does not count.
+            # The lab members named on the work, the person included, for whom it does not count; and whether, for
+            # anyone else, it is not among their works that count.
             doubt = {m for m in {pid, *(by_oa.get(co["id"]) for co in oa.coauthors(w))} & lab
                      if w.get("id") not in counted.get(m, ())} if small else set()
-            if doubt and not complete:
+            unconnected = small and pid not in lab and w.get("id") not in (connects or ())
+            if (doubt or unconnected) and not complete:
                 held.add(w.get("id") or link)   # not recorded, so the next refresh checks it again
                 continue
             updates.setdefault(pid, {"id": pid, "papers": []})["papers"].append(p)
@@ -148,6 +157,10 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             if pid in doubt:
                 digest["leftOut"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
                                           "url": link})
+                continue
+            if unconnected:
+                digest["unconnected"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
+                                              "url": link, "unconfirmed": connects is None})
                 continue
             for co in oa.coauthors(w):
                 if co["id"] in aids:
@@ -276,6 +289,19 @@ def write_digest(ws: Workspace, digest: Dict[str, Any], result: Optional[Dict[st
                      "coauthors.")
         lines.extend(f"- {x['name']}: {x['title']} ({x['year']}) {x['url']}" for x in d["leftOut"][:200])
         lines.append("")
+    if d.get("unconnected"):
+        lines.append(f"## Other people's new papers that added no coauthor records ({len(d['unconnected'])})")
+        lines.append("OpenAlex can file a namesake's papers under anyone's record. A refresh adds coauthor records "
+                     "from a paper of someone outside the lab only when it counts for them, as in `expand`: its "
+                     "authors include someone in the network who vouches for it, it was recorded with a lab member, or "
+                     "it lists them at their recorded institution or at an institution where two such papers list "
+                     "them. A first-degree person's papers count only when their relationship with the lab is more "
+                     "than a coauthor record written from OpenAlex, or they are an author of a lab member's paper that "
+                     "counts (\"unconfirmed\" marks the people for whom neither holds). A later refresh does not read "
+                     "these papers again.")
+        lines.extend(f"- {x['name']}{' (unconfirmed)' if x.get('unconfirmed') else ''}: {x['title']} ({x['year']}) "
+                     f"{x['url']}" for x in d["unconnected"][:200])
+        lines.append("")
     if d.get("checks"):
         lines.append("## For a person to check")
         lines.extend(f"- {x}" for x in d["checks"])
@@ -334,6 +360,8 @@ def refresh(ws_path: str, scope: int = 1, since: Optional[str] = None, dry_run: 
     if d["leftOut"]:
         log(f"{len(d['leftOut'])} of the lab members' new papers connect to nothing else known about them and added no "
             "coauthors.")
+    if d["unconnected"]:
+        log(f"{len(d['unconnected'])} of other people's new papers added no coauthor records (listed in the digest).")
     for x in d["checks"]:
         log(f"To check: {x}")
     if dry_run:

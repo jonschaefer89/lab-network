@@ -11,7 +11,9 @@ Identity rules:
 * Coauthors come from papers with 30 or fewer authors. A person confirmed each lab
   member's OpenAlex record, not each work on it, and OpenAlex sometimes files two
   researchers with the same name under one record, so a lab member's work adds
-  coauthors only when it counts by the rule expand applies.
+  coauthors only when it counts by the rule expand applies, and a first-degree
+  person's work adds coauthors of coauthors only when it connects to what is known
+  about them (expand's step 4).
 * A doctorate is "confirmed" only from an ORCID education record; otherwise the
   field is left out (not classified), which never means "no doctorate".
 * Every relationship cites the works or award it comes from. Shared institutions
@@ -32,7 +34,7 @@ from .connectors import openalex as oa
 from .connectors import orcid as orc
 from .connectors import reporter as rp
 from .connectors.http import Client, HttpError
-from .expand import MAX_AUTHORS, lab_works_that_count
+from .expand import MAX_AUTHORS, LabCheck, connected_works
 from .graph import Graph, TieFilter
 from .model import Notebook, name_key, norm_text, paper_key
 from .packet import BUNDLED_SCHEMA, Packet, sha256_file, validate_rules, validate_schema
@@ -154,6 +156,7 @@ class _Builder:
         self.notes: List[str] = []
         self.unresolved = 0
         self.works_by_person: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+        self.counted: Dict[str, Set[str]] = {}         # lab member -> their works that count, by OpenAlex ID
 
     # -- helpers ---------------------------------------------------------------
 
@@ -320,8 +323,9 @@ class _Builder:
         nb = Notebook(Packet("", {"contacts": contacts, "edges": edges}, [{"id": x} for x in lab_ids], None, None, {},
                              "", 0), [], lab_ids)
         problems: List[str] = []
-        kept, left, _ = lab_works_that_count(_Draft(nb), self.client, problems, problems)   # the problems are noted
+        check = LabCheck(_Draft(nb), self.client, problems, problems)       # the problems are noted
         since = lambda ws: [w for w in ws if (w.get("publication_year") or 0) >= self.s["sinceYear"]]
+        kept, left = check.kept, check.left
         counts = [f"{self.contacts[cid]['name']}, {len(since(works))} of {len(since(works)) + len(since(kept[cid]))}"
                   for cid, works in left.items() if since(works)]
         if counts:              # one note, so the manifest's limitations keep it however many members there are
@@ -330,13 +334,13 @@ class _Builder:
                               "added (OpenAlex sometimes files two researchers with the same name under one record): "
                               + "; ".join(counts) + ".")
         self.notes += problems
-        return {cid: {w.get("id") for w in works} for cid, works in kept.items()}
+        return check.counted
 
     def first_degree(self) -> Dict[str, List[str]]:
         s = self.s
         member_oa = {oa.short_id(m["openalexId"]): m["id"] for m in self.lab["members"]
                      if m.get("openalexId") and m["openalexId"] != "none"}
-        counted = self.counted_works()
+        counted = self.counted = self.counted_works()
         counts: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         for aid, cid in member_oa.items():
             works = oa.works_for_author(self.client, aid, s["sinceYear"], max_works=300)
@@ -392,6 +396,21 @@ class _Builder:
                   sourceUrl=oa.work_link(latest), evidence=evidence[:3000], confidence=confidence,
                   relationshipStatus="unknown", relationshipLabel=f"Coauthors ({n} work{'s' if n > 1 else ''} since {self.s['sinceYear']})")
 
+    def connected(self, cid: str, aid: str, works: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """A first-degree person's works with 30 or fewer authors that count by expand's step 4: works that connect to
+        what is known about them, since OpenAlex sometimes files two researchers with the same name under one record.
+        Here the people who vouch for a work are the lab members, on a work that counts for them, and the other
+        first-degree people."""
+        lab_ids = {m["id"] for m in self.lab["members"]}
+        with_lab = [w for (_, a), shared in self.pair_works.items() if a == aid for w in shared.values()]
+        places = [x.strip() for x in (self.contacts[cid].get("institution") or "").split(";") if x.strip()]
+
+        def vouches(other: str, w: Dict[str, Any]) -> bool:
+            q = self.by_oa.get(other)
+            return q is not None and q != cid and (q not in lab_ids or w.get("id") in self.counted.get(q, ()))
+        small = [w for w in works if len(w.get("authorships") or []) <= MAX_AUTHORS]
+        return connected_works(small, {aid}, places, with_lab, vouches)
+
     def second_degree(self, bridges: Dict[str, List[str]]) -> None:
         s = self.s
         if not s["secondDegree"]:
@@ -415,8 +434,7 @@ class _Builder:
             per: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for w in works:
                 self.works_by_person[cid][w.get("id")] = w
-                if len(w.get("authorships") or []) > MAX_AUTHORS:
-                    continue
+            for w in self.connected(cid, aid, works):
                 for co in oa.coauthors(w):
                     if co["id"] != aid:
                         per[co["id"]].append(w)
@@ -626,6 +644,7 @@ class _Builder:
                                    f"{self.s['maxCoauthorsPerMember']} per member) on papers with {MAX_AUTHORS} or "
                                    "fewer authors that connect to what is known about the member"
                                    + (f", their most frequent coauthors on papers with {MAX_AUTHORS} or fewer authors "
+                                      "that connect to what is known about them "
                                       f"(up to {self.s['maxNewPerBridge']} each)" if self.s["secondDegree"] else "")
                                    + ", NIH RePORTER principal-investigator awards for members with a profile ID, "
                                    "and relationships the lab reported during onboarding."),

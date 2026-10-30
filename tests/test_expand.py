@@ -714,6 +714,48 @@ class ExpandTests(unittest.TestCase):
                 plan = self.run_expand(dry_run=True)["plan"]
         self.assertNotIn("Sol Stranger", self.new_names(plan))
 
+    def test_a_lab_member_vouches_for_a_first_degree_persons_paper_only_when_it_counts_for_them(self):
+        # Wendeline came in through Pat's paper at Lakeside. Two of her papers from Faraway also name Pat, at Faraway,
+        # and nothing else known about Pat connects them to Pat: Pat's name on them shows nothing, so Isolde, on both,
+        # is not collected.
+        svc = Service(Workspace(self.ws_path))
+        wen = svc.create_contact({"fields": {"name": "Wendeline Ashcombe", "institution": LU}}, self.EXPAND)["id"]
+        svc.add_source(wen, {"url": "https://openalex.org/A80", "note": "OpenAlex author record"}, self.EXPAND)
+        svc.create_tie({"fields": {"from": "pi", "to": wen, "type": "coauthor", "provenance": "public",
+                                   "sourceTitle": "Pat and Wendeline at Lakeside (2024)",
+                                   "sourceUrl": "https://openalex.org/W80",
+                                   "evidence": "Named together on 1 work indexed by OpenAlex"}}, self.EXPAND)
+        fp = self.FP
+        with mock.patch.dict(AUTHORS, {"A80": author("A80", "Wendeline Ashcombe"),
+                                       "A81": author("A81", "Isolde Brackenridge", inst=fp)}):
+            extra = [work("W80", 2024, "Pat and Wendeline at Lakeside", [("A1", LU), ("A80", LU)]),
+                     work("W81", 2023, "Wendeline, Pat and Isolde at Faraway", [("A80", fp), ("A1", fp), ("A81", fp)]),
+                     work("W82", 2022, "Wendeline, Pat and Isolde again", [("A80", fp), ("A1", fp), ("A81", fp)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(plan["coverage"][wen]["status"], "collected")
+        self.assertNotIn("Isolde Brackenridge", self.new_names(plan))
+
+    def test_a_first_degree_persons_paper_adds_no_coauthor_record_with_a_lab_member(self):
+        # Peregrine is Sam's reported collaborator, found in OpenAlex only by name in step 3. A namesake's paper on
+        # Pat's record names him and Frankie: it counts for Peregrine (Frankie vouches) but not for Pat, so it ties
+        # Peregrine to Frankie and not to Pat.
+        svc = Service(Workspace(self.ws_path))
+        per = svc.create_contact({"fields": {"name": "Peregrine Oakhurst", "institution": "Remote Academy"}},
+                                 "test")["id"]
+        svc.create_tie({"fields": {"from": "stu", "to": per, "type": "collaborator", "provenance": "reported",
+                                   "evidence": "Ran a study together"}}, "test")
+        svc.add_source("far", {"url": "https://openalex.org/A12", "note": "OpenAlex author record"}, "test")
+        with mock.patch.dict(AUTHORS, {"A91": author("A91", "Peregrine Oakhurst", inst="Remote Academy")}):
+            extra = [work("W90", 2024, "A namesake's paper on Pat's record",
+                          [("A1", self.FP), ("A91", "Quillmoor Institute"), ("A12", LU)])]
+            with mock.patch(__name__ + ".WORKS", WORKS + extra):
+                plan = self.run_expand(dry_run=True)["plan"]
+        self.assertEqual(plan["coverage"]["pi"]["unanchored"], 1)
+        pairs = {frozenset((e["from"], e["to"])) for e in plan["notebook"]["edges"]}
+        self.assertIn(frozenset((per, "far")), pairs)
+        self.assertNotIn(frozenset((per, "pi")), pairs)
+
     def test_a_match_with_no_works_since_the_start_year_is_not_written_to_the_record(self):
         svc = Service(Workspace(self.ws_path))
         nell = svc.create_contact({"fields": {"name": "Nell Nowhere", "institution": "Quiet College",
