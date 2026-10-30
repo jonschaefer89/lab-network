@@ -41,10 +41,10 @@ AUTHORS = {a["id"].rsplit("/", 1)[1]: a for a in [
     author("A6", "Morgan Mentor", "Far Away University", country="GB")]}
 
 
-def work(wid, date, title, authors, n_extra=0):
+def work(wid, date, title, authors, n_extra=0, inst=LU):
     auths = [{"author": {"id": f"https://openalex.org/{a}", "display_name": AUTHORS[a]["display_name"],
                          "orcid": AUTHORS[a]["orcid"] or None},
-              "institutions": [{"display_name": LU}]} for a in authors]
+              "institutions": [{"display_name": inst}]} for a in authors]
     auths += [{"author": {"id": f"https://openalex.org/X{i}", "display_name": f"Consortium Member {i}"},
                "institutions": []} for i in range(n_extra)]
     return {"id": f"https://openalex.org/{wid}", "doi": f"https://doi.org/10.1/{wid.lower()}", "ids": {},
@@ -70,6 +70,7 @@ class Fake:
                      "awardeeName": "Elsewhere College", "startDate": "07/01/2019", "expDate": "06/30/2021"}]
         self.remaining = remaining
         self.fail_search = False
+        self.fails = lambda url: False     # a request it refuses, as a server error would
         self.calls = []
 
     @staticmethod
@@ -84,6 +85,8 @@ class Fake:
 
     def __call__(self, method, url, body, headers):
         self.calls.append(url)
+        if self.fails(url):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
         u = urlsplit(url)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         hdrs = {"x-ratelimit-remaining-usd": self.remaining}
@@ -185,6 +188,54 @@ class LibraryTests(unittest.TestCase):
         self.assertNotEqual(again["digest"], res["digest"])                     # the first digest is kept
         self.assertTrue(os.path.exists(res["digest"]))
 
+    def test_an_update_adds_a_lab_members_paper_only_when_it_counts_for_them(self):
+        # A namesake's paper filed under Pat's record stays off Pat's list and is named once in the digest; Pat's own
+        # new paper at Lakeside is added.
+        self.run_lib()
+        with mock.patch.dict(AUTHORS, {"A7": author("A7", "Thaddeus Quorn", "Remote Academy")}):
+            self.fake.works += [work("W12", TODAY, "A namesake's new paper", ["A1", "A7"], inst="Remote Academy"),
+                                work("W13", TODAY, "Pat's own new paper", ["A1", "A3"])]
+            first = self.run_lib(update=True)
+            second = self.run_lib(update=True)
+        pi = library.load(Workspace(self.ws_path))["people"]["pi"]["openalex"]
+        self.assertEqual(("W13" in pi["works"], "W12" in pi["works"]), (True, False))
+        with open(first["digest"], encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("## Lab members' new papers left out (1)\n", text)
+        self.assertIn("A namesake's new paper", text)
+        with open(second["digest"], encoding="utf-8") as f:
+            self.assertNotIn("A namesake's new paper", f.read())
+
+    def test_an_update_waits_on_a_lab_members_new_papers_while_their_works_cannot_be_checked(self):
+        self.run_lib()
+        self.fake.works.append(work("W13", TODAY, "Pat's own new paper", ["A1", "A3"]))
+        self.fake.fails = lambda url: "cursor=" in url and "sort=" in url     # the check's reading of members' works
+        self.run_lib(update=True)
+        pi = library.load(Workspace(self.ws_path))["people"]["pi"]["openalex"]
+        self.assertEqual(("W13" in pi["works"], pi.get("refill")), (False, True))   # read again in full next time
+        self.fake.fails = lambda url: False
+        res = self.run_lib(update=True)
+        pi = library.load(Workspace(self.ws_path))["people"]["pi"]["openalex"]
+        self.assertEqual(("W13" in pi["works"], pi.get("refill")), (True, None))
+        with open(res["digest"], encoding="utf-8") as f:
+            self.assertIn("Pat's own new paper", f.read())
+
+    def test_a_lab_members_paper_that_does_not_count_identifies_no_one(self):
+        # An earlier expand run tied Wendeline to Pat from OpenAlex. A namesake's paper on Pat's record names a
+        # Wendeline Ashcombe, but it does not count for Pat, so it does not link her to that author record.
+        svc = Service(Workspace(self.ws_path))
+        wen = svc.create_contact({"fields": {"name": "Wendeline Ashcombe", "institution": LU}},
+                                 "expand (OpenAlex)")["id"]
+        svc.create_tie({"fields": {"from": "pi", "to": wen, "type": "coauthor", "provenance": "public",
+                                   "sourceTitle": "An earlier paper (2019)", "sourceUrl": "https://openalex.org/W199",
+                                   "evidence": "Named together on 1 work indexed by OpenAlex"}}, "expand (OpenAlex)")
+        with mock.patch.dict(AUTHORS, {"A8": author("A8", "Wendeline Ashcombe", "Remote Academy")}):
+            self.fake.works.append(work("W15", "2024-03-01", "A namesake's paper with a Wendeline Ashcombe",
+                                        ["A1", "A8"], inst="Remote Academy"))
+            self.run_lib()
+        o = library.load(Workspace(self.ws_path))["people"][wen]["openalex"]
+        self.assertNotEqual(o.get("status"), "linked")
+
     def test_a_first_read_of_awards_is_not_reported_as_new(self):
         self.run_lib(use_nih=False, use_nsf=False)
         res = self.run_lib(update=True)              # NIH and NSF are read for the first time
@@ -213,14 +264,20 @@ class LibraryTests(unittest.TestCase):
                             for x in g["grants"] for a in x["associations"]))
         # Live check: a paper published since the last update is reported, the stored ones are not.
         self.fake.works.append(work("W10", TODAY, "Brand new", ["A1"]))
-        svc._live_client = Client(transport=self.fake)
-        live = svc.latest("pi")
+        raw = library.load(Workspace(self.ws_path))
+        live = library.latest(raw, "pi", Client(transport=self.fake))
         self.assertEqual([w["id"] for w in live["works"]], ["W10"])
         # Each source says whether it was read and when this person was last updated from it.
-        lib = library.load(Workspace(self.ws_path))["people"]["pi"]
+        lib = raw["people"]["pi"]
         self.assertEqual(live["sources"]["openalex"], {"checked": True, "since": lib["openalex"]["worksAt"], "note": ""})
         self.assertEqual(live["sources"]["nih"], {"checked": True, "since": lib["nih"]["checkedAt"], "note": ""})
         self.assertEqual(live["notes"], [])
+        # Pat is a lab member: the profile leaves their new papers to the weekly update, which checks them.
+        svc._live_client = Client(transport=self.fake)
+        live = svc.latest("pi")
+        self.assertEqual((live["works"], live["sources"]["openalex"]["checked"]), ([], False))
+        self.assertIn("lab member", live["sources"]["openalex"]["note"])
+        self.assertTrue(live["sources"]["nih"]["checked"])
 
     def test_look_up_someone_outside_the_network(self):
         self.run_lib()
@@ -962,8 +1019,7 @@ class SplitAuthorTests(unittest.TestCase):
             self.fake.works += [work("W40", TODAY, "Brand new, under the second record", ["A2"]),
                                 work("W41", TODAY, "Brand new, under both records", ["A1", "A2"])]
             svc = Service(Workspace(self.ws_path))
-            svc._live_client = Client(transport=self.fake)
-            live = svc.latest("pi")
+            live = library.latest(library.load(Workspace(self.ws_path)), "pi", Client(transport=self.fake))
         self.assertEqual(sorted(w["id"] for w in live["works"]), ["W40", "W41"])          # each once
         asked = parse_qs(urlsplit([u for u in self.fake.calls if "/works" in u][-1]).query)["filter"][0]
         self.assertIn("authorships.author.id:A1|A2,", asked)                              # one request, both records
@@ -1164,9 +1220,10 @@ class SplitAuthorTests(unittest.TestCase):
             svc = Service(Workspace(self.ws_path))
             svc.mark_not_theirs("pi", {"openalexId": "A2"}, "test")
             self.fake.works.append(work("W40", TODAY, "New, under the other record", ["A2"]))
-            # The live check reads only Pat's own record, before and after the next library run.
-            svc._live_client = Client(transport=self.fake)
-            live = svc.latest("pi")
+            # The live check reads only Pat's own record, before and after the next library run. (On Pat's profile it
+            # reads none: Pat is a lab member; the library as the profile sees it is used here.)
+            live = library.latest(svc.library(), "pi", Client(transport=self.fake),
+                                  not_theirs=svc.nb.openalex_not_theirs("pi"))
             asked = [parse_qs(urlsplit(u).query)["filter"][0] for u in self.fake.calls if "/works" in u][-1]
             self.assertTrue(asked.startswith("authorships.author.id:A1,"), asked)
             self.assertEqual(sorted(w["id"] for w in live["works"]), ["W1", "W2"])   # a list read just now

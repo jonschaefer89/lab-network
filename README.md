@@ -190,8 +190,9 @@ authors and add a lab member's coauthors only from papers that count for that me
 person's coauthors, and a refresh adds coauthor records between people outside the lab, only from papers that count
 for that person by the rule above; a refresh also leaves out first-degree people whose relationship with the lab
 nothing confirms. Onboarding checks the papers against the relationships in `lab.json`, since nothing else is recorded
-yet, and `packet/source-manifest.json` says how many of each member's papers it left out. A refresh lists the new
-papers it left out in its digest; once such a paper counts, `expand` adds its coauthors.
+yet, and `packet/source-manifest.json` says how many of each member's papers it left out. A refresh and the weekly
+library update leave a lab member's new paper that does not count off their profile and name it once in their
+digests; they add it if it comes to count while it is still recent.
 
 ### The research library
 

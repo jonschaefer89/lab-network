@@ -46,7 +46,8 @@ from .connectors import nsf
 from .connectors import openalex as oa
 from .connectors import reporter as rp
 from .connectors.http import BudgetReached, Client, HttpError
-from .expand import _authorships, _family_ok, _works, default_cache, family_key, name_parts, name_score, surname_tokens
+from .expand import (LabCheck, _authorships, _family_ok, _works, default_cache, family_key, name_parts, name_score,
+                     surname_tokens)
 from .graph import TieFilter
 from .model import norm_text
 from .refresh import _nih_profile, _running_port, openalex_links
@@ -608,6 +609,9 @@ class _Run:
         # An award RePORTER added since shortly before the previous run is new; NIH posts awards in batches.
         self.nih_cutoff = _ago(str(runs[-1].get("date") or "")[:10] if runs else today(), 14)
         self._cached: Optional[Dict[str, Tuple[Dict[str, Any], str]]] = None
+        self.lab = set(self.nb.root_ids)
+        self._lab_check: Optional[Tuple[Optional[LabCheck], bool]] = None
+        self.left_out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)    # lab member -> works left out this run
 
     def rec(self, pid: str) -> Dict[str, Any]:
         return self.lib["people"].setdefault(pid, {})
@@ -644,6 +648,26 @@ class _Run:
     def from_record(self, pid: str, links: List[str]) -> None:
         """Link a person to the OpenAlex records their record links to (see link_from_record)."""
         link_from_record(self.rec(pid).setdefault("openalex", {}), links)
+
+    def counted(self, pid: str) -> Optional[Tuple[Set[str], bool]]:
+        """For a lab member, their works that count by expand's rule (OpenAlex IDs; see expand.LabCheck), and whether
+        every record the rule reads could be read; None for anyone else. A person confirmed each lab member's OpenAlex
+        record, not each work on it, and OpenAlex sometimes files two researchers with the same name under one record.
+        The rule is worked out once a run."""
+        if pid not in self.lab:
+            return None
+        if self._lab_check is None:
+            problems: List[str] = []
+            try:
+                check: Optional[LabCheck] = LabCheck(self.svc, self.client, problems, problems, self.lib, fresh=True)
+            except HttpError as exc:              # the spending limit too
+                check = None
+                problems.append(f"lab members' OpenAlex works could not be checked ({exc})")
+            self._lab_check = (check, check is not None and not check.unread)
+            for x in problems:
+                self.log(f"  {x}")
+        check, complete = self._lab_check
+        return ((check.counted.get(pid) or set()) if check else set()), complete
 
     def cached_authors(self) -> Dict[str, Tuple[Dict[str, Any], str]]:
         """OpenAlex author records in the response cache (read once a run), with those this run has fetched since."""
@@ -864,11 +888,21 @@ class _Run:
     def keep_works(self, pid: str, raw: List[Dict[str, Any]], first: bool, new_since: Optional[str] = None) -> None:
         o = self.rec(pid)["openalex"]
         have = list(o.get("works") or [])
+        counts = self.counted(pid)
+        held = False
         for w in raw:
             if len(w.get("authorships") or []) > self.std["maxAuthors"]:
                 continue
             wid = oa.short_id(w.get("id", ""))
             if not wid:
+                continue
+            if counts is not None and wid not in have and w.get("id") not in counts[0]:
+                # A lab member's new work joins their list only when it counts for them. When the rule could not read
+                # every record, their whole list is read again next run.
+                if counts[1]:
+                    self.leave_out(pid, wid, w)
+                else:
+                    held = True
                 continue
             if wid not in self.lib["works"]:
                 self.lib["works"][wid] = _work_record(w)
@@ -885,6 +919,15 @@ class _Run:
             o["datedAt"] = today()        # read with publication dates; a paper OpenAlex no longer lists keeps none
             o.pop("refill", None)
             o.pop("reread", None)
+        if held:
+            o["refill"] = True
+
+    def leave_out(self, pid: str, wid: str, w: Dict[str, Any]) -> None:
+        """Note a lab member's work that does not count for them, for the digest: each one once."""
+        o = self.rec(pid)["openalex"]
+        if wid not in (o.get("leftOut") or []):
+            o["leftOut"] = ((o.get("leftOut") or []) + [wid])[-200:]
+            self.left_out[pid].append({"id": wid, **_work_record(w)})
 
     def identify_by_coauthors(self, unlinked: List[str]) -> List[str]:
         """Match unlinked people to coauthors on recent papers of people they have recorded relationships with. A record
@@ -906,6 +949,9 @@ class _Run:
                             if self.client.has_cached(_works_url(self.client, ids, self.since)) else None
                     except HttpError:
                         raw = None
+                counts = self.counted(other) if raw else None
+                if counts is not None:           # a lab member's works that do not count for them identify no one
+                    raw = [w for w in raw if w.get("id") in counts[0]]
                 for w in raw or []:
                     for a in w.get("authorships") or []:
                         au = a.get("author") or {}
@@ -1324,6 +1370,14 @@ def write_digest(ws: Workspace, svc: Service, lib: Dict[str, Any], r: Any, statu
         for wid in r.new_works[pid]:
             w = lib["works"].get(wid) or {}
             lines.append(f"  - {w.get('title', wid)} ({w.get('date') or w.get('year') or ''}) {w.get('url', '')}")
+    left = [(pid, x) for pid in sorted(r.left_out, key=order) for x in r.left_out[pid]]
+    if left:
+        lines += ["", f"## Lab members' new papers left out ({len(left)})",
+                  "OpenAlex sometimes files two researchers with the same name under one record. These papers on a lab "
+                  "member's record connect to nothing else known about them, so they were not added to the library; "
+                  "each one is listed once."]
+        lines += [f"- **{names.get(pid, pid)}**: {x['title']} ({x['date'] or x['year'] or ''}) {x['url']}"
+                  for pid, x in left]
     awards = [(pid, k) for pid in r.new_awards for k in r.new_awards[pid]]
     lines += ["", f"## New awards ({len(awards)})"]
     for pid in sorted(r.new_awards, key=order):
@@ -1342,15 +1396,17 @@ def write_digest(ws: Workspace, svc: Service, lib: Dict[str, Any], r: Any, statu
         f.write("\n".join(lines) + "\n")
     with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
         json.dump({"date": date, "createdAt": created, "kind": "library", "newWorks": r.new_works, "newAwards": r.new_awards,
-                   "coverage": status, "stopped": r.openalex_stopped}, f, indent=1)
+                   "leftOut": r.left_out, "coverage": status, "stopped": r.openalex_stopped}, f, indent=1)
     return path
 
 
 # --------------------------------------------------------------------------- the live check on a profile page
 
-def latest(lib: Dict[str, Any], pid: str, client: Client, not_theirs: Iterable[str] = ()) -> Dict[str, Any]:
+def latest(lib: Dict[str, Any], pid: str, client: Client, not_theirs: Iterable[str] = (),
+           lab_member: bool = False) -> Dict[str, Any]:
     """Papers and NIH awards newer than the person's last library update, straight from the sources. Records marked as
-    not theirs (`not_theirs`) are not read."""
+    not theirs (`not_theirs`) are not read. A lab member's new papers are left to the weekly update, which lists one
+    only once it counts for them (`_Run.counted`): checking that here would read every lab member's works."""
     rec = lib["people"].get(pid) or {}
     o = rec.get("openalex") or {}
     std = lib.get("standard") or STANDARD
@@ -1368,7 +1424,11 @@ def latest(lib: Dict[str, Any], pid: str, client: Client, not_theirs: Iterable[s
 
     no = set(not_theirs)
     ids = [i for i in author_ids(o) if i not in no]
-    if o.get("status") == "linked" and ids:
+    if lab_member:
+        skip("openalex", "New papers on a lab member's OpenAlex record are not listed here: OpenAlex sometimes files "
+                         "two researchers with the same name under one record, so the weekly update lists one only "
+                         "once it counts for them.")
+    elif o.get("status") == "linked" and ids:
         since = _ago(o.get("worksAt") or today(), std["lookBackDays"]) if o.get("worksAt") else f"{std['sinceYear']}-01-01"
         try:                                    # one request covers all of the person's records
             data = client.get(f"{oa.API}/works", oa._params(client, {

@@ -346,8 +346,11 @@ class _Builder:
             works = oa.works_for_author(self.client, aid, s["sinceYear"], max_works=300)
             self.log(f"  {self.contacts[cid]['name']}: {len(works)} works since {s['sinceYear']}")
             for w in works:
+                small = len(w.get("authorships") or []) <= MAX_AUTHORS
+                if small and w.get("id") not in counted.get(cid, ()):
+                    continue                # a work that does not count goes on neither their profile nor the map
                 self.works_by_person[cid][w.get("id")] = w
-                if w.get("id") not in counted.get(cid, ()) or len(w.get("authorships") or []) > MAX_AUTHORS:
+                if not small:
                     continue
                 for co in oa.coauthors(w):
                     if co["id"] != aid:

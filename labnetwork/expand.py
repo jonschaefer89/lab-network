@@ -200,7 +200,7 @@ def _works(client: Client, aids: List[str], since: str = "", max_authors: Option
 
 
 def _all_works(client: Client, aids: List[str], since: str = "", max_authors: Optional[int] = MAX_AUTHORS,
-               select: str = WORK_SELECT) -> Tuple[List[Dict[str, Any]], bool]:
+               select: str = WORK_SELECT, use_cache: bool = True) -> Tuple[List[Dict[str, Any]], bool]:
     """Every work on these author records, newest first, read page by page. The flag says the reading stopped after
     MAX_PAGES pages."""
     flt = "authorships.author.id:" + "|".join(oa.short_id(a) for a in aids)
@@ -212,7 +212,8 @@ def _all_works(client: Client, aids: List[str], since: str = "", max_authors: Op
     cursor = "*"
     for _ in range(MAX_PAGES):
         data = client.get(f"{oa.API}/works", oa._params(client, {"filter": flt, "sort": "publication_date:desc",
-                                                                 "per-page": 200, "select": select, "cursor": cursor}))
+                                                                 "per-page": 200, "select": select, "cursor": cursor}),
+                          use_cache=use_cache)
         batch = data.get("results", [])
         out += batch
         cursor = (data.get("meta") or {}).get("next_cursor")
@@ -852,10 +853,13 @@ class LabCheck:
 
     Everyone else (step 4): `collects` leaves out a first-degree person whose only relationship with the lab is a
     coauthor record written from OpenAlex and whom no lab member's work that counts names, and `anchored` keeps the
-    works that connect to what is known about a person."""
+    works that connect to what is known about a person.
+
+    `fresh` reads the lab members' works again instead of from the response cache, for a caller judging works newer
+    than its cache."""
 
     def __init__(self, svc: Service, client: Client, errors: List[str], checks: List[str],
-                 lib: Optional[Dict[str, Any]] = None):
+                 lib: Optional[Dict[str, Any]] = None, fresh: bool = False):
         self.P = P = _Plan(svc, 0, lib)
         lab_works: Dict[str, List[Dict[str, Any]]] = {}
         self.unread: Set[str] = set()
@@ -863,7 +867,7 @@ class LabCheck:
             if pid not in P.active or pid not in P.oa_of:
                 continue
             try:
-                lab_works[pid], _ = _all_works(client, P.oa_of[pid])
+                lab_works[pid], _ = _all_works(client, P.oa_of[pid], use_cache=not fresh)
             except BudgetReached:
                 raise
             except HttpError as exc:

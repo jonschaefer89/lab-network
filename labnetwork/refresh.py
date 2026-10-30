@@ -36,6 +36,7 @@ from .service import Service, slugify
 from .store import Workspace, today, utc_now
 
 PROFILE_RX = re.compile(r"profile ID (\d+)", re.I)
+HOLD_DAYS = 60      # a person's papers held back this long are judged with the records that can be read
 
 
 def _openalex_id(c: Dict[str, Any]) -> List[str]:
@@ -75,6 +76,15 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
     since_date = (_dt.date.fromisoformat(last[:10]) - _dt.timedelta(days=45)).isoformat()
     people = sorted((pid for pid, d in dist.items() if d is not None and d <= scope),
                     key=lambda p: (dist[p], p))[:max_people]
+    # People whose new papers an earlier refresh did not all record: the date to read theirs from, and the date their
+    # papers were first held back (an entry that has outlived any hold is dropped). And the lab members' papers already
+    # listed as left out.
+    overdue = (_dt.date.today() - _dt.timedelta(days=HOLD_DAYS)).isoformat()
+    forgotten = (_dt.date.today() - _dt.timedelta(days=HOLD_DAYS + 45)).isoformat()
+    pending: Dict[str, Dict[str, str]] = {p: e for p, e in (settings.get("refreshPending") or {}).items()
+                                          if isinstance(e, dict) and nb.is_active("contacts", p)
+                                          and e.get("since", "") >= forgotten}
+    listed: Dict[str, str] = dict(settings.get("refreshLeftOut") or {})
     by_oa = {}
     for pid, c in nb.active("contacts"):
         for a in openalex_links(nb, pid):
@@ -105,6 +115,9 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
     complete = check is not None and not check.unread
     unchecked: List[str] = []           # lab members whose new papers were not read
     held: Set[str] = set()              # new papers held back, by OpenAlex ID
+    settled: List[str] = []             # people judged although a record was missing, after HOLD_DAYS of holding
+    unreadable: Dict[str, int] = {}     # lab member -> new papers not added, their own works unreadable that long
+    next_pending: Dict[str, Dict[str, str]] = {p: e for p, e in pending.items() if p not in people}
     checked_ids = []
     for pid in people:
         c = nb.records["contacts"][pid]
@@ -113,15 +126,24 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             digest["skippedNoLink"] += 1
             continue
         checked_ids.append((pid, aids[0]))      # affiliation changes are read from the main record
-        if pid in lab and pid not in counted:
+        entry = pending.get(pid) or {}
+        start = min(since_date, entry.get("from") or since_date)
+        hold = {"from": start, "since": entry.get("since") or today()}
+        # Held back for HOLD_DAYS already: judged now with the records that can be read.
+        sure = complete or hold["since"] < overdue
+        if pid in lab and pid not in counted and not sure:
             unchecked.append(c["name"])
+            next_pending[pid] = hold
             continue
         try:
-            works = oa.works_for_author(client, aids, 0, max_works=50, since_date=since_date)
+            works = oa.works_for_author(client, aids, 0, max_works=200 if entry else 50, since_date=start)
         except HttpError as exc:
             digest["errors"].append(f"{c['name']}: {exc}")
+            next_pending[pid] = hold
             continue
         digest["checked"] += 1
+        if sure and not complete and not (pid in lab and pid not in counted):
+            settled.append(c["name"])
         have = {paper_key(p) for p in c.get("papers") or []}
         # Anyone but a lab member: the works expand's step 4 would count for them, by OpenAlex ID. None when expand
         # would not collect their coauthors at all, because their relationship with the lab is unconfirmed.
@@ -147,16 +169,22 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
             doubt = {m for m in {pid, *(by_oa.get(co["id"]) for co in oa.coauthors(w))} & lab
                      if w.get("id") not in counted.get(m, ())} if small else set()
             unconnected = small and pid not in lab and w.get("id") not in (connects or ())
-            if (doubt or unconnected) and not complete:
+            if (doubt or unconnected) and not sure:
                 held.add(w.get("id") or link)   # not recorded, so the next refresh checks it again
+                next_pending[pid] = hold
+                continue
+            if pid in doubt and pid not in counted:     # their own works could not be read: nothing was checked
+                unreadable[c["name"]] = unreadable.get(c["name"], 0) + 1
+                continue
+            if pid in doubt:                    # not on their profile; listed once, and checked again next time
+                if (w.get("id") or link) not in listed:
+                    listed[w.get("id") or link] = today()
+                    digest["leftOut"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
+                                              "url": link})
                 continue
             updates.setdefault(pid, {"id": pid, "papers": []})["papers"].append(p)
             digest["papers"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"], "url": link})
             if not small:
-                continue
-            if pid in doubt:
-                digest["leftOut"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
-                                          "url": link})
                 continue
             if unconnected:
                 digest["unconnected"].append({"personId": pid, "name": c["name"], "title": title, "year": p["year"],
@@ -196,7 +224,19 @@ def plan_update(svc: Service, client: Client, scope: int = 1, since: Optional[st
         digest["errors"].append(f"{len(held)} new {'paper was' if one else 'papers were'} not recorded, because a "
                                 f"record needed to check {'it' if one else 'them'} against what is known about the lab "
                                 f"could not be read; the next refresh checks {'it' if one else 'them'} again.")
-    digest["heldBack"] = bool(unchecked or held)       # refresh() then keeps the date of the last refresh
+    if settled:
+        digest["errors"].append(f"The new papers of {', '.join(settled)} were checked although a record the check "
+                                f"needs could not be read, after their papers had been held back for {HOLD_DAYS} days, "
+                                "so some that would count may have been left out.")
+    for name, n in unreadable.items():
+        digest["errors"].append(f"{n} new {'paper' if n == 1 else 'papers'} of {name} {'was' if n == 1 else 'were'} "
+                                f"not added: their OpenAlex works could not be read for {HOLD_DAYS} days, so whether "
+                                f"{'it is' if n == 1 else 'they are'} theirs could not be checked.")
+    # Kept by refresh(): where the next refresh starts for each person held back and since when, and the papers listed
+    # as left out (each is listed once; after a few months it is out of a refresh's reach).
+    keep_after = (_dt.date.today() - _dt.timedelta(days=120)).isoformat()
+    digest["pending"] = next_pending
+    digest["listedLeftOut"] = {k: d for k, d in listed.items() if d >= keep_after}
     # Affiliation changes, read in batches.
     authors = oa.get_authors(client, [a for _, a in checked_ids]) if checked_ids else {}
     for pid, aid in checked_ids:
@@ -282,11 +322,12 @@ def write_digest(ws: Workspace, digest: Dict[str, Any], result: Optional[Dict[st
     if d.get("leftOut"):
         lines.append(f"## Lab members' new papers that added no coauthors ({len(d['leftOut'])})")
         lines.append("OpenAlex sometimes files two researchers with the same name under one record. These papers on a "
-                     "lab member's record connect to nothing else known about them, so their coauthors were not added, "
-                     "and a later refresh does not read them again. A paper counts once the ORCID record whose iD is "
-                     "on the member's record lists it, once someone records a relationship with one of its coauthors, "
-                     "or once the institution it lists for the member is on their record; `expand` then adds its "
-                     "coauthors.")
+                     "lab member's record connect to nothing else known about them, so they were not added to the "
+                     "member's profile and their coauthors were not added; each is named here once. A later refresh "
+                     "adds one, with its coauthors, if it comes to count while it is still among the papers a refresh "
+                     "reads: once the ORCID record whose iD is on the member's record lists it, once someone records a "
+                     "relationship with one of its coauthors, or once the institution it lists for the member is on "
+                     "their record.")
         lines.extend(f"- {x['name']}: {x['title']} ({x['year']}) {x['url']}" for x in d["leftOut"][:200])
         lines.append("")
     if d.get("unconnected"):
@@ -379,11 +420,12 @@ def refresh(ws_path: str, scope: int = 1, since: Optional[str] = None, dry_run: 
             result["heldForReview"] = _held(prev)
         finally:
             ws.release_lock()
-    if d["heldBack"]:           # the next refresh reads the same papers again
-        log("Some papers were held back (see the digest), so the date of the last refresh stays as it was.")
-    else:
-        ws.config.setdefault("settings", {})["lastRefresh"] = today()
-        ws.save_config()
+    settings = ws.config.setdefault("settings", {})
+    settings.update({"lastRefresh": today(), "refreshPending": d["pending"], "refreshLeftOut": d["listedLeftOut"]})
+    ws.save_config()
+    if d["pending"]:
+        log(f"The next refresh reads the papers of {len(d['pending'])} "
+            f"{'person' if len(d['pending']) == 1 else 'people'} again from an earlier date (see the digest).")
     path = write_digest(ws, d, result)
     log(f"Digest written to {path}")
     return {"dryRun": False, "digest": d, "result": result, "digestPath": path}

@@ -1274,7 +1274,8 @@ class Service:
         hit = self._latest.get(pid)
         if hit and time.time() - hit[0] < 6 * 3600:
             return hit[1]
-        res = libmod.latest(lib, pid, self._live(), not_theirs=self.nb.openalex_not_theirs(pid))
+        res = libmod.latest(lib, pid, self._live(), not_theirs=self.nb.openalex_not_theirs(pid),
+                            lab_member=pid in self.nb.root_ids)
         self._latest[pid] = (time.time(), res)
         return res
 

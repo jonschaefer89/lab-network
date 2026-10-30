@@ -68,7 +68,8 @@ only those with a confirmed doctorate and a known institution and position, beca
 
 - **OpenAlex.** Each person's author record (works, citations, h-index, main topics) and up to 50 of their most recent
   works since the start year with 30 or fewer authors. A person is identified by the OpenAlex links on their record; by
-  their name on a recent paper of someone they have a recorded relationship with; or, if they have a confirmed
+  their name on a recent paper of someone they have a recorded relationship with (a lab member's paper only when it
+  counts for the member); or, if they have a confirmed
   doctorate, as the only OpenAlex author with their name at an institution on their record. Anyone else is listed as
   not matched, and each weekly update tries again. OpenAlex often splits one researcher across several author records:
   records with the same ORCID iD count as one author (once a month the library looks up each linked person's ORCID iD

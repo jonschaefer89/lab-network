@@ -14,7 +14,11 @@ Each update, for everyone in the research library:
 
 - **Papers.** Asks OpenAlex for works published in the 60 days before the last update or later, 50 author records per
   request, so papers OpenAlex adds late are still caught. New ones (30 or fewer authors) join the person's recent
-  papers. A person who gained an OpenAlex record since the last update has their list read again in full.
+  papers. A person who gained an OpenAlex record since the last update has their list read again in full. A lab
+  member's new paper joins their list only when it counts for them by the rule `expand` uses (see
+  [Fill in the first and second degree](../README.md#fill-in-the-first-and-second-degree)), because OpenAlex sometimes
+  files two researchers with the same name under one record; the digest names each one left out, once. While a record
+  the rule reads cannot be read, the lab member's list is read again in full at the next update.
 - **Summaries.** Refreshes each person's OpenAlex counts, h-index and topics.
 - **Split records.** Once a month for each person, asks OpenAlex for every author record with the same ORCID iD as
   their records, 50 iDs per request (about $0.003 for 1,500 people). It adds the records not linked to anyone else
@@ -33,8 +37,8 @@ Each update, for everyone in the research library:
 It writes `workspace/digests/library-YYYY-MM-DD.md` with the new papers and awards, nearest people first (a second
 update on the same day gets its own file). OpenAlex
 usually lists a paper within days of publication; NIH posts awards in batches, often weeks after the award notice.
-Opening a person's page checks both sources live, so that person is always current; `config WORKSPACE --live-check
-off` turns this off.
+Opening a person's page checks both sources live, so that person is always current; for a lab member it checks NIH
+only, and their new papers wait for the weekly update's check. `config WORKSPACE --live-check off` turns this off.
 
 Once the library is full, a weekly update costs about $0.01 of OpenAlex's free daily allowance. Until then, each
 update also fetches the paper lists still missing, nearest people first, and stops after $0.08 (about 800 lists), or
@@ -91,7 +95,8 @@ python3 labnetwork.py refresh ~/LabNetwork/my-lab/workspace --scope 1
 
 For each person within the chosen degree of the lab (`--scope 1` or `--scope 2`) whose record has an OpenAlex link:
 
-- **New papers** since the last refresh (with 45 days of overlap, because indexing lags) are added to their profile.
+- **New papers** since the last refresh (with 45 days of overlap, because indexing lags) are added to their profile,
+  except a lab member's paper that does not count for them (below).
 - **New coauthors of lab members** are added as new people, each with a coauthor record citing the paper.
 - **New ties between people already in the notebook** are added when they appear on a new paper together.
 - **Only papers with 30 or fewer authors** add people or ties; a larger paper still goes on the profile. A new person,
@@ -104,10 +109,13 @@ For each person within the chosen degree of the lab (`--scope 1` or `--scope 2`)
   coauthor record written from OpenAlex, or they are an author of a lab member's paper that counts. To apply the
   rules, each refresh reads the research library, all of the lab members' OpenAlex works, and the ORCID records whose
   iDs are on their records. The digest lists the new papers that added no coauthors or ties, and any ORCID iD for you
-  to check. A later refresh does not read those papers again; once one counts, `expand` adds its coauthors. If a
-  record the check needs cannot be read (a lab member's OpenAlex works or ORCID record, or the research library), the
-  refresh records none of the papers it could not check and keeps the date of the last refresh, so the next refresh
-  reads them again.
+  to check. A lab member's paper that does not count stays off their profile and is named once; a later refresh adds
+  it, with its coauthors, if it comes to count while it is still among the papers a refresh reads. Other people's
+  papers are not read again; once one counts, `expand` adds its coauthors. If a record the check needs cannot be read
+  (a lab member's OpenAlex works or ORCID record, or the research library), the refresh records none of the papers it
+  could not check, and the next refresh reads those people's papers from where this one started, up to 200 of them.
+  Once a person's papers have been held back for 60 days, a refresh judges them with the records it can read and says
+  so in the digest; a lab member's own new papers are not added while their own works still cannot be read.
 - **A changed affiliation** is not applied. If OpenAlex lists a different institution, it becomes an open conflict on
   the Data page, and your recorded value stays until you choose.
 - **New NIH awards** for lab members with a RePORTER profile ID are added to their profiles.

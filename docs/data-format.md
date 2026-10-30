@@ -60,7 +60,9 @@ the person while their record links to one of them. Records with different ORCID
 different authors. Paper lists, weekly updates and the live check read all of a person's records, and each paper is listed once.
 The `summary` adds works, works since the start year, citations and `i10` over the records and keeps the largest
 record's `hIndex`, which is a lower bound for the combined record. `refill` marks a paper list that is read again in
-full because the person gained a record.
+full because the person gained a record, or, for a lab member, because a record the check of their new papers reads
+could not be read. `leftOut` lists a lab member's works that do not count for them (see "Fill in the first and second
+degree" in the README), so that a weekly digest names each one once.
 
 `library.json` is version 2. A run upgrades a version-1 file (one `id` per person) when it loads it: it adds `ids` and
 searches again for people a version-1 name search left `ambiguous`. A version-1 reader still finds each person's main
@@ -105,6 +107,11 @@ count a year as presenting only for the other roles (`presentingYears`), unless 
 | `liveCheck` | `false` stops profile pages from checking OpenAlex and NIH for anything newer (`config WORKSPACE --live-check off`) |
 | `contactEmail` | Sent to OpenAlex with each request, from `lab.json` |
 | `demo` | Marks the fictional demo lab: no library runs, weekly updates or live checks |
+
+The scheduled refresh keeps its own records in the same settings: `lastRefresh` (the date of the last run),
+`refreshPending` (for each person whose papers were held back, `from`, the date the next refresh reads their papers
+from, and `since`, the date their papers were first held back) and `refreshLeftOut` (OpenAlex work ID to the date a lab
+member's paper that does not count was named in a digest).
 
 On every start, Lab Network checks that `notebook.json` still matches the SHA-256 recorded in `workspace.json`, and
 refuses to run if it does not.

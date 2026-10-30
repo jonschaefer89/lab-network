@@ -328,6 +328,9 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue({"Isolde Brackenridge", "Wendeline Ashcombe", "Zephyrine Mallowby", "L. Thistlewood",
                          "Dana Moreau"} <= people, people)
         self.assertNotIn("Ludovica Thistlewood", people)        # the collaborator record joined their OpenAlex record
+        pat = next(c for c in nb["contacts"] if c["name"] == "Pat Rivera")
+        titles = {p["title"] for p in pat["papers"]}
+        self.assertFalse({"A namesake's first paper", "A namesake's second paper"} & titles)
         with open(os.path.join(out, "source-manifest.json"), encoding="utf-8") as f:
             limits = json.load(f)["limitations"]
         note = next((x for x in limits if x.startswith("Lab members' OpenAlex works since")), "")
@@ -424,9 +427,8 @@ class OnboardingTests(unittest.TestCase):
         self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w46", YEAR)]
         res = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)
         d = res["digest"]
-        self.assertEqual(sorted(p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"),
-                         ["A namesake's new paper", "Pat and Sam at Remote Academy",
-                          "Pat's new paper on their ORCID record"])                         # all on the profile
+        self.assertEqual(sorted(p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"),   # not the namesake's
+                         ["Pat and Sam at Remote Academy", "Pat's new paper on their ORCID record"])
         self.assertEqual(sorted(p["name"] for p in d["newPeople"]), ["Seraphina Wolstencroft", "Zephyrine Mallowby"])
         self.assertEqual([x["title"] for x in d["leftOut"]], ["A namesake's new paper"])
         svc = Service(Workspace(ws.path))
@@ -446,7 +448,7 @@ class OnboardingTests(unittest.TestCase):
         for aid in ("A1", "A6"):                # OpenAlex lists a work under each of its authors
             self.api.works.setdefault(aid, []).insert(0, copy.deepcopy(w40))
         d = refresh(ws.path, scope=2, client=self.client, log=lambda m: None)["digest"]
-        self.assertEqual(sorted(p["name"] for p in d["papers"]), ["Farah Nadeem", "Pat Rivera"])
+        self.assertEqual([p["name"] for p in d["papers"]], ["Farah Nadeem"])          # Pat's profile does not get it
         self.assertEqual(d["newTies"], [])
         self.assertEqual(d["newPeople"], [])
 
@@ -467,6 +469,69 @@ class OnboardingTests(unittest.TestCase):
     def last_refresh(self, ws):
         return (Workspace(ws.path).config.get("settings") or {}).get("lastRefresh")
 
+    def pending(self, ws):
+        return (Workspace(ws.path).config.get("settings") or {}).get("refreshPending")
+
+    def test_a_lab_members_paper_that_does_not_count_stays_off_their_profile_until_it_counts(self):
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        self.api.works["A1"].insert(0, work("W40", "A namesake's new paper", YEAR, ["A1", "A26"],
+                                            date=dt.date.today().isoformat(), insts={"A1": RA}))
+        runs = [refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"] for _ in range(2)]
+        self.assertEqual([[x["title"] for x in d["leftOut"]] for d in runs], [["A namesake's new paper"], []])  # once
+        self.assertEqual([d["papers"] + d["newPeople"] for d in runs], [[], []])
+        # Pat adds it to their ORCID record: the next refresh finds it counts, and adds it with its coauthor.
+        self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w40", YEAR)]
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(([p["title"] for p in d["papers"]], [p["name"] for p in d["newPeople"]]),
+                         (["A namesake's new paper"], ["Peregrine Oakhurst"]))
+
+    def hold(self, ws, **entries):
+        """Record people as held back by earlier refreshes: person -> (days since the read started, days held)."""
+        today = dt.date.today()
+        ws.config["settings"]["refreshPending"] = {
+            p.replace("_", "-"): {"from": (today - dt.timedelta(days=a)).isoformat(),
+                                  "since": (today - dt.timedelta(days=b)).isoformat()} for p, (a, b) in entries.items()}
+        ws.save_config()
+
+    def test_papers_held_back_for_sixty_days_are_judged_with_the_records_that_can_be_read(self):
+        # Pat's ORCID record has not been readable for a while. Pat's new paper, which counts only for being listed
+        # there, waits while the hold is under 60 days old, and is then judged without it: left out.
+        ws = self.built_workspace()
+        self.add_people(OTHERS)
+        today = dt.date.today()
+        self.api.works["A1"].insert(0, work("W46", "Pat's new paper on their ORCID record", YEAR, ["A1", "A25"],
+                                            date=today.isoformat(), insts={"A1": FP}))
+        self.api.orcid_works["0000-0000-0000-0001"] = [("10.0000/w46", YEAR)]
+        self.api.fails = lambda url: "pub.orcid.org" in url and url.endswith("/works")
+        self.hold(ws, pat_rivera=(59, 14))         # two weekly refreshes ago
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual((d["leftOut"], [p["title"] for p in d["papers"]]), ([], []))
+        self.assertEqual(self.pending(ws)["pat-rivera"]["since"], (today - dt.timedelta(days=14)).isoformat())
+        # Farah's entry is too old to matter now; Gus's is kept for a refresh that reads him.
+        self.hold(ws, pat_rivera=(115, 70), farah_nadeem=(250, 200), gus_tamm=(55, 10))
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(([x["title"] for x in d["leftOut"]], d["newPeople"]),
+                         (["Pat's new paper on their ORCID record"], []))
+        self.assertTrue(any(e.startswith("The new papers of Pat Rivera were checked although") for e in d["errors"]))
+        self.assertEqual(list(self.pending(ws)), ["gus-tamm"])
+        # Pat's papers were read from where the hold started, and more of them than usual.
+        start = (today - dt.timedelta(days=115)).isoformat()
+        asked = [u for u in self.api.calls if "filter=author.id:A1," in u]
+        self.assertTrue(any("per-page=200" in u and f"from_publication_date:{start}" in u for u in asked), asked)
+
+    def test_papers_of_a_member_whose_works_stay_unreadable_are_not_added(self):
+        ws = self.built_workspace()
+        today = dt.date.today().isoformat()
+        self.api.works["A1"].insert(0, work("W9", "New sleep paper", YEAR, ["A1", "A8", "A3"], date=today))
+        self.api.fails = lambda url: "authorships.author.id:A1," in url
+        self.hold(ws, pat_rivera=(115, 70))
+        d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
+        self.assertEqual(([p for p in d["papers"] if p["name"] == "Pat Rivera"], d["newPeople"], d["leftOut"]),
+                         ([], [], []))
+        self.assertTrue(any(e.startswith("1 new paper of Pat Rivera was not added: their OpenAlex works could not be "
+                                          "read") for e in d["errors"]), d["errors"])
+
     def test_a_refresh_that_cannot_check_a_members_works_reads_their_papers_next_time(self):
         # The last refresh was 30 days ago, and OpenAlex listed Pat's new paper late: it is dated 60 days ago, so only
         # a refresh that reads from 45 days before the last one finds it.
@@ -483,12 +548,15 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual((d["newPeople"], d["leftOut"]), ([], []))
         self.assertTrue(any(e.startswith("The new papers of Pat Rivera were not read") for e in d["errors"]),
                         d["errors"])
-        self.assertEqual(self.last_refresh(ws), (today - dt.timedelta(days=30)).isoformat())     # kept
+        # The refresh date moves on, and Pat's papers are read next time from where this refresh started.
+        self.assertEqual((self.last_refresh(ws), self.pending(ws)),
+                         (today.isoformat(), {"pat-rivera": {"from": (today - dt.timedelta(days=75)).isoformat(),
+                                                             "since": today.isoformat()}}))
         self.api.fails = lambda url: False
         d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
         self.assertEqual([p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"], ["New sleep paper"])
         self.assertEqual([p["name"] for p in d["newPeople"]], ["Hana Brooks"])
-        self.assertEqual(self.last_refresh(ws), today.isoformat())
+        self.assertEqual(self.pending(ws), {})
 
     def test_a_paper_checked_without_a_record_it_needs_is_held_back(self):
         # Pat's ORCID record cannot be read, so a new paper that counts only for being listed there waits; Pat's new
@@ -509,7 +577,7 @@ class OnboardingTests(unittest.TestCase):
                          ["Pat and Sam at Remote Academy"])
         self.assertEqual(([p["name"] for p in d["newPeople"]], d["leftOut"]), (["Seraphina Wolstencroft"], []))
         self.assertTrue(any(e.startswith("1 new paper was not recorded") for e in d["errors"]), d["errors"])
-        self.assertIsNone(self.last_refresh(ws))
+        self.assertEqual(list(self.pending(ws)), ["pat-rivera"])
         self.api.fails = lambda url: False
         d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
         self.assertEqual([p["title"] for p in d["papers"] if p["name"] == "Pat Rivera"],
@@ -527,7 +595,7 @@ class OnboardingTests(unittest.TestCase):
         d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
         self.assertEqual(([p for p in d["papers"] if p["name"] == "Pat Rivera"], d["newPeople"]), ([], []))
         self.assertTrue(any(e.startswith("The research library could not be read") for e in d["errors"]), d["errors"])
-        self.assertIsNone(self.last_refresh(ws))
+        self.assertIn("pat-rivera", self.pending(ws))
         os.remove(path)
         d = refresh(ws.path, scope=1, client=self.client, log=lambda m: None)["digest"]
         self.assertEqual([p["name"] for p in d["newPeople"]], ["Hana Brooks"])
